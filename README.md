@@ -754,18 +754,23 @@ skelpo-cms/
 
 ```bash
 npm run test:unit          # pure logic, no DB — runs anywhere (47 tests)
-npm run test:integration   # full API against a MySQL test DB (18 tests)
-npm test                   # both
+npm run test:integration   # full API + admin UI vs a MySQL test DB (34 tests)
+npm test                   # both — 81 total
 ```
 
 - **Unit** (`tests/unit/`): permissions, cache (LRU + dep-graph + ETag),
   datetime normalization, password hashing, content-writer validation,
   all of `@skelpo/site-kit`, and the `@skelpo/cms-client` cache/client.
-- **Integration** (`tests/integration/api.test.ts`): one DB reset + server
-  boot, then auth/ratelimit, content CRUD + publish + SEO-gate + cache +
-  304, schema evolution, menus/settings/redirects, users/roles, form
-  spam, media alt-enforcement, webhook dispatch, and a full
-  backup→wipe→restore FK-integrity round-trip. Auto-skips when no MySQL.
+- **Integration** (`tests/integration/`): `api.test.ts` — auth/ratelimit,
+  content CRUD + publish + SEO-gate + cache + 304, schema evolution,
+  menus/settings/redirects, users/roles, form spam, media
+  alt-enforcement, webhook dispatch, full backup→wipe→restore
+  FK-integrity round-trip. `admin.test.ts` — the HTMX admin: auth gate,
+  login/logout, dashboard, content editor (create/publish/SEO-gate/
+  delete), and every secondary screen incl. their form posts. Each file
+  resets the DB + boots a server; run serially. Auto-skips when no MySQL.
+  (The perry-landing scripts are thin glue over the SDK + site-kit, both
+  exhaustively covered by the suites above.)
 - CI: `.github/workflows/test.yml` — Node 22 & 24, MySQL 8 service,
   typecheck (all 3 packages) + unit + integration.
 

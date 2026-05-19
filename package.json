@@ -23,7 +23,7 @@
     "migrate": "tsx src/cli/main.ts migrate",
     "test": "npm run test:unit && npm run test:integration",
     "test:unit": "SESSION_SECRET=unit_test_secret_unit_test_secret_unit_test_secret_unit node --import tsx --test 'tests/unit/*.test.ts'",
-    "test:integration": "ls tests/integration/*.test.ts >/dev/null 2>&1 && node --import tsx --test 'tests/integration/*.test.ts' || echo 'no integration tests (set up a test DB + add tests/integration/*.test.ts)'"
+    "test:integration": "ls tests/integration/*.test.ts >/dev/null 2>&1 && node --import tsx --test --test-concurrency=1 'tests/integration/*.test.ts' || echo 'no integration tests (set up a test DB + add tests/integration/*.test.ts)'"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.0",
