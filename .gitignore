@@ -23,6 +23,7 @@ uploads/
 
 # Generated proof / scratch artifacts
 .proof/
+.testuploads/
 
 # Editor / OS
 .DS_Store
