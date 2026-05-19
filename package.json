@@ -1,0 +1,43 @@
+{
+  "name": "@skelpo/cms",
+  "version": "0.1.0-pre",
+  "description": "Skelpo CMS — a blazingly fast, opinionated, native TypeScript CMS. Designed for Perry AOT, runs on Node and Bun.",
+  "license": "UNLICENSED",
+  "private": true,
+  "type": "module",
+  "main": "dist/server.js",
+  "bin": {
+    "skelpo-cms": "dist/cli/main.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:perry": "perry build src/server.ts -o dist/skelpo-cms",
+    "start": "node dist/server.js",
+    "start:bun": "bun src/server.ts",
+    "start:perry": "./dist/skelpo-cms",
+    "dev": "tsx watch src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "migrate": "tsx src/cli/main.ts migrate",
+    "test": "echo 'no tests yet' && exit 0"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.0",
+    "@perryts/mysql": "^0.1.3",
+    "bcryptjs": "^3.0.2",
+    "hono": "^4.10.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.6.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/skelpo/cms.git"
+  },
+  "homepage": "https://skelpo.com/cms",
+  "author": "Skelpo"
+}

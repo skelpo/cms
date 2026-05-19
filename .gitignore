@@ -1,0 +1,44 @@
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Native binaries
+/skelpo-cms
+/skelpo-cms-*
+
+# Dependencies
+node_modules/
+
+# Local config / secrets
+.env
+.env.local
+.env.*.local
+*.local
+
+# Runtime data
+uploads/
+.cache/
+*.skelpo-backup
+
+# Generated proof / scratch artifacts
+.proof/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Coverage
+coverage/
+.nyc_output/
+
+# Misc
+.tmp/
+.scratch/

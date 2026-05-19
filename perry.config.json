@@ -1,0 +1,10 @@
+{
+  "entry": "src/server.ts",
+  "output": "dist/skelpo-cms",
+  "target": "native",
+  "compilePackages": [
+    "@perryts/mysql",
+    "hono",
+    "bcryptjs"
+  ]
+}
