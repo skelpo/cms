@@ -27,11 +27,22 @@ export async function startServer(timeoutMs = 15000): Promise<string> {
 }
 
 export async function stopServer(): Promise<void> {
-  if (proc) {
-    proc.kill('SIGTERM');
-    proc = null;
-    await new Promise((res) => setTimeout(res, 300));
+  if (!proc) return;
+  const p = proc;
+  proc = null;
+  const exited = new Promise<void>((res) => p.once('exit', () => res()));
+  p.kill('SIGTERM');
+  // Wait for real exit; hard-kill if it overruns graceful shutdown.
+  const killed = await Promise.race([
+    exited.then(() => true),
+    new Promise<boolean>((res) => setTimeout(() => res(false), 4000)),
+  ]);
+  if (!killed) {
+    p.kill('SIGKILL');
+    await exited;
   }
+  // Brief settle so the OS releases the port + DB connections fully.
+  await new Promise((res) => setTimeout(res, 300));
 }
 
 export interface ApiClient {

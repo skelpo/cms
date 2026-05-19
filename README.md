@@ -748,6 +748,33 @@ skelpo-cms/
 
 ---
 
+## Testing
+
+`node:test` via `tsx` — zero extra test deps, runs on Node/Bun/Perry.
+
+```bash
+npm run test:unit          # pure logic, no DB — runs anywhere (47 tests)
+npm run test:integration   # full API against a MySQL test DB (18 tests)
+npm test                   # both
+```
+
+- **Unit** (`tests/unit/`): permissions, cache (LRU + dep-graph + ETag),
+  datetime normalization, password hashing, content-writer validation,
+  all of `@skelpo/site-kit`, and the `@skelpo/cms-client` cache/client.
+- **Integration** (`tests/integration/api.test.ts`): one DB reset + server
+  boot, then auth/ratelimit, content CRUD + publish + SEO-gate + cache +
+  304, schema evolution, menus/settings/redirects, users/roles, form
+  spam, media alt-enforcement, webhook dispatch, and a full
+  backup→wipe→restore FK-integrity round-trip. Auto-skips when no MySQL.
+- CI: `.github/workflows/test.yml` — Node 22 & 24, MySQL 8 service,
+  typecheck (all 3 packages) + unit + integration.
+
+The suite has already caught and fixed three real bugs: an `updateOwn`
+authorization bypass, a `TRUNCATE`-on-FK-referenced-table restore failure,
+and an empty-JSON-string restore crash.
+
+---
+
 ## References
 
 - **`docs/api-spec.md`** — REST API specification (v1)

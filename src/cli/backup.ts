@@ -87,23 +87,43 @@ export async function restoreBackup(inPath: string): Promise<{ tables: number; r
   const payload = JSON.parse(gunzipSync(gz).toString('utf8')) as BackupFile;
   if (payload.version !== 1) throw new Error(`unsupported backup version: ${payload.version}`);
 
+  // Discover JSON columns so we re-encode ALL values bound for them —
+  // not just objects. The driver returns JSON columns parsed, so a stored
+  // `""` comes back as the JS string '' which is NOT valid JSON on insert.
+  const jsonColsRes = await pool.query<{ TABLE_NAME: string; COLUMN_NAME: string }>(
+    `SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND DATA_TYPE = 'json'`,
+  );
+  const jsonCols = new Map<string, Set<string>>();
+  for (const r of jsonColsRes.rows) {
+    let s = jsonCols.get(r.TABLE_NAME);
+    if (!s) { s = new Set(); jsonCols.set(r.TABLE_NAME, s); }
+    s.add(r.COLUMN_NAME);
+  }
+
   await pool.query('SET FOREIGN_KEY_CHECKS = 0');
   let rowCount = 0;
   try {
-    // Restore in TABLES order (FK-safe); truncate then bulk-insert.
+    // DELETE (not TRUNCATE): MySQL rejects TRUNCATE on any table that's
+    // the target of a FK from another table, even with FK checks off.
+    // Rows are inserted with their original ids; we then realign each
+    // table's AUTO_INCREMENT past MAX(id) so future inserts don't collide.
+    for (const t of [...TABLES].reverse()) {
+      await pool.query(`DELETE FROM \`${t}\``);
+    }
     for (const t of TABLES) {
       const rows = payload.tables[t];
-      if (!rows) continue;
-      // TRUNCATE (not DELETE) so AUTO_INCREMENT resets — restored rows
-      // carry their original ids, keeping FK references intact.
-      await pool.query(`TRUNCATE TABLE \`${t}\``);
+      if (!rows || rows.length === 0) continue;
+      const tableJsonCols = jsonCols.get(t) ?? new Set<string>();
       for (const row of rows) {
         const cols = Object.keys(row);
         if (cols.length === 0) continue;
         const placeholders = cols.map(() => '?').join(',');
         const vals = cols.map((c) => {
           const v = (row as Record<string, unknown>)[c];
-          // Re-serialize objects (JSON columns come back parsed).
+          // JSON columns: always re-encode (incl. '', numbers, null →
+          // 'null') so the value is a valid JSON document on insert.
+          if (tableJsonCols.has(c)) return JSON.stringify(v ?? null);
           return v !== null && typeof v === 'object' ? JSON.stringify(v) : v;
         });
         await pool.query(
@@ -111,6 +131,14 @@ export async function restoreBackup(inPath: string): Promise<{ tables: number; r
           vals,
         );
         rowCount++;
+      }
+      // Realign AUTO_INCREMENT if this table has a numeric `id`.
+      if (rows[0] && 'id' in rows[0]) {
+        const maxId = rows.reduce((m, r) => {
+          const v = Number((r as { id?: unknown }).id);
+          return Number.isFinite(v) && v > m ? v : m;
+        }, 0);
+        await pool.query(`ALTER TABLE \`${t}\` AUTO_INCREMENT = ${maxId + 1}`);
       }
     }
   } finally {

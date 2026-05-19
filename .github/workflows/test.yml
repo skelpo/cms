@@ -1,0 +1,63 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+          MYSQL_DATABASE: skelpo_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install (root + workspaces)
+        run: |
+          npm ci
+          (cd packages/cms-client && npm ci)
+          (cd packages/site-kit && npm ci)
+
+      - name: Typecheck (all packages)
+        run: |
+          npm run typecheck
+          (cd packages/cms-client && npm run typecheck)
+          (cd packages/site-kit && npm run typecheck)
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Integration tests
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: '3306'
+          DB_USER: root
+          DB_PASSWORD: ''
+          DB_NAME: skelpo_test
+          SESSION_SECRET: ci_test_secret_ci_test_secret_ci_test_secret_ci_test
+        run: npm run test:integration
