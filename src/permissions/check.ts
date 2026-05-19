@@ -78,16 +78,19 @@ export function can(
 
   const typeCaps = ctx.caps.types[typeSlug] ?? ctx.caps.types['*'] ?? [];
 
-  if (typeCaps.includes(action)) return true;
-
-  // Ownership-bounded permissions: `update` implies `updateOwn`.
+  // Ownership-bounded permissions MUST be checked before the generic
+  // `includes(action)` short-circuit — otherwise holding `updateOwn`
+  // would grant edit on ANY row regardless of owner (security bug).
   if (action === 'updateOwn' || action === 'deleteOwn') {
-    if (ownerId === null || ownerId === undefined) return false;
-    if (ownerId !== ctx.userId) return false;
-    const ownAction = action;
     const baseAction = action === 'updateOwn' ? 'update' : 'delete';
-    return typeCaps.includes(ownAction) || typeCaps.includes(baseAction);
+    if (!typeCaps.includes(action) && !typeCaps.includes(baseAction)) return false;
+    // Holding the unbounded base action (update/delete) grants regardless
+    // of ownership; only the *Own grant is ownership-restricted.
+    if (typeCaps.includes(baseAction)) return true;
+    return ownerId !== null && ownerId !== undefined && ownerId === ctx.userId;
   }
+
+  if (typeCaps.includes(action)) return true;
 
   // `update` and `delete` requested but only `*Own` granted → check ownership.
   if (action === 'update' && typeCaps.includes('updateOwn')) {
