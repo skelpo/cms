@@ -1,0 +1,97 @@
+name: release
+
+# Tag-driven publish for the two scoped npm packages in this monorepo.
+#
+# Tag scheme: `<package>@v<version>`, e.g. `cms-client@v0.1.1` or
+# `site-kit@v0.2.0`. The job derives the package directory from the tag
+# prefix, verifies the tag version matches the package.json version, then
+# publishes with npm provenance via OIDC (npm Trusted Publisher).
+#
+# Trusted Publisher configuration on npmjs.com (one-time per package):
+#   Publisher type:  GitHub Actions
+#   Organization:    skelpo
+#   Repository:      cms
+#   Workflow file:   release.yml
+#   Environment:     npm-publish
+
+on:
+  push:
+    tags:
+      - 'cms-client@v*'
+      - 'site-kit@v*'
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Package to publish
+        type: choice
+        required: true
+        options: [cms-client, site-kit]
+      version:
+        description: Version (must match package.json)
+        type: string
+        required: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write   # required for npm provenance / Trusted Publisher
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive package + version from tag or dispatch input
+        id: meta
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PKG="${{ inputs.package }}"
+            VER="${{ inputs.version }}"
+          else
+            REF="${GITHUB_REF#refs/tags/}"
+            PKG="${REF%@v*}"
+            VER="${REF##*@v}"
+          fi
+          case "$PKG" in
+            cms-client|site-kit) ;;
+            *) echo "::error::unknown package '$PKG'"; exit 1 ;;
+          esac
+          echo "pkg=$PKG" >> "$GITHUB_OUTPUT"
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "dir=packages/$PKG" >> "$GITHUB_OUTPUT"
+          echo "Publishing @skelpo/$PKG@$VER from packages/$PKG"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+          cache-dependency-path: ${{ steps.meta.outputs.dir }}/package-lock.json
+
+      - name: Sanity-check tag version against package.json
+        working-directory: ${{ steps.meta.outputs.dir }}
+        run: |
+          set -euo pipefail
+          PKG_VER=$(node -p "require('./package.json').version")
+          if [ "$PKG_VER" != "${{ steps.meta.outputs.ver }}" ]; then
+            echo "::error::tag version ${{ steps.meta.outputs.ver }} ≠ package.json $PKG_VER"
+            exit 1
+          fi
+
+      - name: Install
+        working-directory: ${{ steps.meta.outputs.dir }}
+        run: npm ci || npm install --no-audit --no-fund
+
+      - name: Build
+        working-directory: ${{ steps.meta.outputs.dir }}
+        run: npm run build
+
+      - name: Pack preview (logged)
+        working-directory: ${{ steps.meta.outputs.dir }}
+        run: npm pack --dry-run
+
+      - name: Publish to npm with provenance
+        working-directory: ${{ steps.meta.outputs.dir }}
+        run: npm publish --provenance --access public
