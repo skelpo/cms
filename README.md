@@ -3,8 +3,13 @@
 > A blazingly fast, opinionated, native TypeScript CMS for agencies and small businesses.
 > Designed for [Perry](https://github.com/PerryTS/perry) AOT compilation. Runs on Node and Bun too.
 
-**Status:** v0.1 feature-complete (2026-05-19). Backend + HTMX admin + `@skelpo/cms-client` + `@skelpo/site-kit` + CLI all implemented and end-to-end verified; perry.land is the proven first sample case (see `docs/perry-landing-integration.md`). Not yet committed — pending owner review.
-**Owner:** Skelpo. Private until v1.0.
+**Status:** v0.1 (2026-05-20). Backend + HTMX admin + `@skelpo/cms-client` + `@skelpo/site-kit` + CLI all implemented and end-to-end verified; perry.land is the proven first sample case (see `docs/perry-landing-integration.md`).
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![@skelpo/cms-client](https://img.shields.io/npm/v/@skelpo/cms-client?label=%40skelpo%2Fcms-client)](https://www.npmjs.com/package/@skelpo/cms-client)
+[![@skelpo/site-kit](https://img.shields.io/npm/v/@skelpo/site-kit?label=%40skelpo%2Fsite-kit)](https://www.npmjs.com/package/@skelpo/site-kit)
+
+**License:** MIT. **Maintained by** [Skelpo GmbH](https://skelpo.com).
 
 ---
 

@@ -1,8 +1,34 @@
 {
   "name": "@skelpo/site-kit",
-  "version": "0.1.0-pre",
-  "description": "Framework-agnostic SEO + structured-data helpers for Skelpo CMS customer frontends. Works with Next.js, Hono, Astro, anything.",
-  "license": "UNLICENSED",
+  "version": "0.1.0",
+  "description": "Framework-agnostic SEO + structured-data helpers for Skelpo CMS customer frontends — sitemap, robots, llms.txt, RSS, JSON-LD. Works with Next.js, Hono, Astro, anything.",
+  "license": "MIT",
+  "author": "Skelpo GmbH <support@skelpo.com>",
+  "homepage": "https://github.com/skelpo/cms/tree/main/packages/site-kit#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/skelpo/cms.git",
+    "directory": "packages/site-kit"
+  },
+  "bugs": {
+    "url": "https://github.com/skelpo/cms/issues"
+  },
+  "keywords": [
+    "skelpo",
+    "cms",
+    "seo",
+    "sitemap",
+    "robots",
+    "rss",
+    "llms-txt",
+    "json-ld",
+    "structured-data",
+    "i18n",
+    "hreflang",
+    "perry",
+    "hono",
+    "next"
+  ],
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -13,12 +39,22 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
   },
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0"

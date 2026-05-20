@@ -1,8 +1,29 @@
 {
   "name": "@skelpo/cms-client",
-  "version": "0.1.0-pre",
-  "description": "Typed client for Skelpo CMS — fetch content, settings, menus; submit forms; receive webhooks.",
-  "license": "UNLICENSED",
+  "version": "0.1.0",
+  "description": "Typed client for Skelpo CMS — fetch content, settings, menus; submit forms; verify webhooks. Works in Node, Bun, browsers, and Perry-compiled binaries.",
+  "license": "MIT",
+  "author": "Skelpo GmbH <support@skelpo.com>",
+  "homepage": "https://github.com/skelpo/cms/tree/main/packages/cms-client#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/skelpo/cms.git",
+    "directory": "packages/cms-client"
+  },
+  "bugs": {
+    "url": "https://github.com/skelpo/cms/issues"
+  },
+  "keywords": [
+    "skelpo",
+    "cms",
+    "headless-cms",
+    "client",
+    "typescript",
+    "api-client",
+    "perry",
+    "hono",
+    "i18n"
+  ],
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -13,12 +34,22 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
   },
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {},
   "devDependencies": {
     "@types/node": "^22.0.0",

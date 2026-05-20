@@ -1,8 +1,8 @@
 {
   "name": "@skelpo/cms",
-  "version": "0.1.0-pre",
+  "version": "0.1.0",
   "description": "Skelpo CMS — a blazingly fast, opinionated, native TypeScript CMS. Designed for Perry AOT, runs on Node and Bun.",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "main": "dist/server.js",
@@ -38,8 +38,25 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/skelpo/cms.git"
+    "url": "git+https://github.com/skelpo/cms.git"
   },
-  "homepage": "https://skelpo.com/cms",
-  "author": "Skelpo"
+  "bugs": {
+    "url": "https://github.com/skelpo/cms/issues"
+  },
+  "homepage": "https://github.com/skelpo/cms#readme",
+  "author": "Skelpo GmbH <support@skelpo.com>",
+  "keywords": [
+    "cms",
+    "headless-cms",
+    "typescript",
+    "perry",
+    "native",
+    "hono",
+    "htmx",
+    "mysql",
+    "i18n"
+  ],
+  "workspaces": [
+    "packages/*"
+  ]
 }
