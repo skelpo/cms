@@ -28,3 +28,17 @@ adminStatic.get('/htmx.min.js', async (c) => {
   c.header('Cache-Control', 'public, max-age=31536000, immutable');
   return c.body(body);
 });
+
+adminStatic.get('/easymde/easymde.min.js', async (c) => {
+  const { body, type } = await load('easymde/easymde.min.js', 'application/javascript; charset=utf-8');
+  c.header('Content-Type', type);
+  c.header('Cache-Control', 'public, max-age=31536000, immutable');
+  return c.body(body);
+});
+
+adminStatic.get('/easymde/easymde.min.css', async (c) => {
+  const { body, type } = await load('easymde/easymde.min.css', 'text/css; charset=utf-8');
+  c.header('Content-Type', type);
+  c.header('Cache-Control', 'public, max-age=31536000, immutable');
+  return c.body(body);
+});

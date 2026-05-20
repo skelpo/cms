@@ -195,6 +195,57 @@ adminRoutes.get('/', async (c) => {
   );
 });
 
+// ── Content types index ────────────────────────────────────────────────
+
+adminRoutes.get('/types', async (c) => {
+  const auth = gate(c);
+  if (auth instanceof Response) return auth;
+  const types = await listTypes();
+  // Per-type row counts (any locale)
+  const counts = new Map<string, number>();
+  for (const t of types) {
+    const r = await queryOne<{ n: number }>(
+      'SELECT COUNT(*) n FROM `content` WHERE `typeSlug` = ?',
+      [t.slug],
+    );
+    counts.set(t.slug, r?.n ?? 0);
+  }
+  return c.html(
+    <AdminPage title="Content Types" active="types" user={auth.user}>
+      <div class="top">
+        <h1>Content Types</h1>
+        <span class="muted">{types.length} types</span>
+      </div>
+      <div class="card">
+        <table>
+          <thead>
+            <tr>
+              <th>Type</th>
+              <th>Label</th>
+              <th>URL pattern</th>
+              <th>Rows</th>
+              <th>Schema rev</th>
+            </tr>
+          </thead>
+          <tbody>
+            {types.map((t) => (
+              <tr>
+                <td>
+                  <a href={`/admin/content/${t.slug}`}>{t.slug}</a>
+                </td>
+                <td class="muted">{t.labelPlural}</td>
+                <td class="muted">{t.urlPattern ?? '—'}</td>
+                <td class="muted">{counts.get(t.slug) ?? 0}</td>
+                <td class="muted">v{t.currentRevision ?? 1}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </AdminPage>,
+  );
+});
+
 // ── Content list ───────────────────────────────────────────────────────
 
 adminRoutes.get('/content/:type', async (c) => {
@@ -205,11 +256,26 @@ adminRoutes.get('/content/:type', async (c) => {
   const t = types.find((x) => x.slug === typeSlug);
   if (!t) return c.html(<AdminPage title="Not found" user={auth.user}>Unknown type</AdminPage>, 404);
 
+  // Locale filter — defaults to en. "all" shows every locale (useful for
+  // diffing translation coverage). Available locales come from site.locales.
+  const sel = c.req.query('locale') ?? 'en';
+  let availableLocales: string[] = ['en'];
+  try {
+    const sl = await queryOne<{ value: unknown }>(
+      "SELECT `value` FROM `settings` WHERE `keyName` = 'site.locales'",
+    );
+    if (sl) {
+      const v = typeof sl.value === 'string' ? JSON.parse(sl.value) : sl.value;
+      if (Array.isArray(v) && v.length > 0) availableLocales = v as string[];
+    }
+  } catch { /* default to en */ }
+
   const { rows } = await listContent({
     typeSlug,
+    locale: sel === 'all' ? undefined : sel,
     status: ['draft', 'review', 'published', 'archived'],
     includeDrafts: true,
-    limit: 100,
+    limit: 200,
     sort: '-updatedAt',
   });
 
@@ -220,6 +286,20 @@ adminRoutes.get('/content/:type', async (c) => {
         <a class="btn" href={`/admin/content/${typeSlug}/new`}>
           + New {t.labelSingular}
         </a>
+      </div>
+      <div class="card" style="margin-bottom:14px;padding:10px 14px">
+        <form method="get" style="display:flex;align-items:center;gap:10px;margin:0">
+          <label class="muted" for="locale-sel" style="margin:0">Locale</label>
+          <select name="locale" id="locale-sel" onchange="this.form.submit()" style="background:#15161c;border:1px solid #333;color:#ccc;padding:4px 8px;border-radius:4px">
+            <option value="all" selected={sel === 'all'}>All locales</option>
+            {availableLocales.map((l) => (
+              <option value={l} selected={sel === l}>{l}</option>
+            ))}
+          </select>
+          <span class="muted" style="margin-left:auto;font-size:12px">
+            {rows.length} {rows.length === 1 ? 'row' : 'rows'}{sel !== 'all' ? ` (locale: ${sel})` : ' (all locales)'}
+          </span>
+        </form>
       </div>
       <div class="card">
         <table>
@@ -236,7 +316,7 @@ adminRoutes.get('/content/:type', async (c) => {
             {rows.length === 0 ? (
               <tr>
                 <td colspan={5} class="muted">
-                  No {t.labelPlural.toLowerCase()} yet.
+                  No {t.labelPlural.toLowerCase()} yet{sel !== 'all' ? ` in locale "${sel}"` : ''}.
                 </td>
               </tr>
             ) : (
@@ -261,6 +341,20 @@ adminRoutes.get('/content/:type', async (c) => {
   );
 });
 
+// Read `site.locales` (universe of locales) for translation tabs.
+async function readSiteLocales(): Promise<string[]> {
+  try {
+    const r = await queryOne<{ value: unknown }>(
+      "SELECT `value` FROM `settings` WHERE `keyName` = 'site.locales'",
+    );
+    if (!r) return ['en'];
+    // JSON column: driver may return either the raw string or a pre-parsed value.
+    const v = typeof r.value === 'string' ? JSON.parse(r.value) : r.value;
+    if (Array.isArray(v) && v.length > 0) return v as string[];
+  } catch { /* fall through */ }
+  return ['en'];
+}
+
 // ── Content editor: new ────────────────────────────────────────────────
 
 adminRoutes.get('/content/:type/new', async (c) => {
@@ -271,7 +365,47 @@ adminRoutes.get('/content/:type/new', async (c) => {
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'create', t.slug)) {
     return c.html(<AdminPage title="Forbidden" user={auth.user}>No create permission for {t.slug}</AdminPage>, 403);
   }
-  return c.html(<ContentForm type={t} fields={{}} seo={{}} user={auth.user} />);
+
+  // If creating a translation of an existing row, pre-populate slug + title
+  // from the source row and render locale tabs alongside the form.
+  const translationOfParam = c.req.query('translationOf');
+  const localeParam = c.req.query('locale');
+  let siblings: { id: number; locale: string; status: string }[] = [];
+  let availableLocales: string[] = [];
+  let defaultTitle = '';
+  let defaultSlug = '';
+  let defaultLocale = localeParam ?? 'en';
+  let translationOf: number | undefined;
+
+  if (translationOfParam) {
+    const sourceId = Number(translationOfParam);
+    const source = await findById(sourceId, true);
+    if (source && source.typeSlug === t.slug) {
+      translationOf = sourceId;
+      defaultTitle = source.title;
+      defaultSlug = source.slug;
+      siblings = await query<{ id: number; locale: string; status: string }>(
+        'SELECT `id`, `locale`, `status` FROM `content` WHERE `translationGroupId` = ? AND `typeSlug` = ? ORDER BY `locale`',
+        [source.translationGroupId, t.slug],
+      );
+      availableLocales = await readSiteLocales();
+    }
+  }
+
+  return c.html(
+    <ContentForm
+      type={t}
+      fields={{}}
+      seo={{}}
+      user={auth.user}
+      siblings={siblings}
+      availableLocales={availableLocales}
+      translationOf={translationOf}
+      defaultTitle={defaultTitle}
+      defaultSlug={defaultSlug}
+      defaultLocale={defaultLocale}
+    />,
+  );
 });
 
 // ── Content editor: edit (must come AFTER /new) ────────────────────────
@@ -290,8 +424,27 @@ adminRoutes.get('/content/:type/:id{[0-9]+}', async (c) => {
     : c.req.query('err')
       ? { err: c.req.query('err')! }
       : undefined;
+
+  // Translation siblings (other-locale rows in the same translation group).
+  const [siblings, availableLocales] = await Promise.all([
+    query<{ id: number; locale: string; status: string }>(
+      'SELECT `id`, `locale`, `status` FROM `content` WHERE `translationGroupId` = ? AND `typeSlug` = ? ORDER BY `locale`',
+      [row.translationGroupId, t.slug],
+    ),
+    readSiteLocales(),
+  ]);
+
   return c.html(
-    <ContentForm type={t} row={row} fields={fields} seo={seo} user={auth.user} flash={flash} />,
+    <ContentForm
+      type={t}
+      row={row}
+      fields={fields}
+      seo={seo}
+      user={auth.user}
+      flash={flash}
+      siblings={siblings}
+      availableLocales={availableLocales}
+    />,
   );
 });
 
@@ -323,6 +476,7 @@ adminRoutes.post('/content/:type', async (c) => {
     ai: p.ai,
     status: 'draft',
     authorId: auth.user.id,
+    translationOf: p.translationOf,
   });
   if (!res.ok) {
     return c.redirect(

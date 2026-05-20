@@ -6,12 +6,30 @@
 // the binary has zero runtime CDN dependency.
 
 import type { FC, PropsWithChildren } from 'hono/jsx';
+import { listTypes } from '../content/types.js';
+
+// Custom content types (not built-in: page/post/doc) get listed in the
+// sidebar dynamically. Cached on the registry's existing invalidation
+// path (listTypes is itself cached + invalidated on type CRUD).
+async function customTypes(): Promise<{ slug: string; label: string }[]> {
+  try {
+    const all = await listTypes();
+    return all
+      .filter((t) => !['page', 'post', 'doc', 'form', 'errorPage'].includes(t.slug))
+      .map((t) => ({ slug: t.slug, label: t.labelPlural }));
+  } catch { return []; }
+}
 
 const CSS = `
+/* Dark (default) */
 :root{--bg:#0b0c0f;--panel:#15171c;--panel2:#1c1f26;--line:#2a2e38;
 --ink:#e7e9ee;--mut:#9aa0ad;--acc:#f59e0b;--acc2:#fbbf24;--ok:#34d399;--err:#f87171}
+/* Light */
+:root[data-theme="light"]{
+--bg:#fafafa;--panel:#ffffff;--panel2:#f3f4f6;--line:#e5e7eb;
+--ink:#1f2937;--mut:#6b7280;--acc:#f59e0b;--acc2:#d97706;--ok:#059669;--err:#dc2626}
 *{box-sizing:border-box}html,body{margin:0;padding:0}
-body{background:var(--bg);color:var(--ink);font:14px/1.55 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
+body{background:var(--bg);color:var(--ink);font:14px/1.55 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto;transition:background-color .15s,color .15s}
 a{color:var(--acc2);text-decoration:none}a:hover{text-decoration:underline}
 .app{display:grid;grid-template-columns:230px 1fr;min-height:100vh}
 .side{background:var(--panel);border-right:1px solid var(--line);padding:18px 14px;display:flex;flex-direction:column;gap:4px}
@@ -59,7 +77,9 @@ padding:10px 12px;border-radius:7px;margin:10px 0;font-size:13px}
 
 export const AdminPage: FC<
   PropsWithChildren<{ title: string; active?: string; user?: { displayName: string } | null }>
-> = ({ title, active, user, children }) => (
+> = async ({ title, active, user, children }) => {
+  const extras = user ? await customTypes() : [];
+  return (
   <html lang="en">
     <head>
       <meta charset="utf-8" />
@@ -67,6 +87,18 @@ export const AdminPage: FC<
       <meta name="robots" content="noindex,nofollow" />
       <title>{title} · Skelpo CMS</title>
       <style dangerouslySetInnerHTML={{ __html: CSS }} />
+      {/* Apply saved theme before paint to avoid flash-of-wrong-theme. */}
+      <script dangerouslySetInnerHTML={{ __html: `
+        try{var t=localStorage.getItem('skelpo-theme');
+        if(t==='light')document.documentElement.setAttribute('data-theme','light');}catch(e){}
+      ` }} />
+      {/* Set the toggle icon to match the active theme after DOM loads. */}
+      <script dangerouslySetInnerHTML={{ __html: `
+        document.addEventListener('DOMContentLoaded',function(){
+          var icon=document.getElementById('skelpo-theme-icon');
+          if(icon)icon.textContent=document.documentElement.getAttribute('data-theme')==='light'?'☾':'☀';
+        });
+      ` }} />
       <script src="/admin/static/htmx.min.js" defer></script>
     </head>
     <body>
@@ -90,8 +122,16 @@ export const AdminPage: FC<
               <a href="/admin/content/doc" class={active === 'doc' ? 'on' : ''}>
                 Docs
               </a>
+              {extras.map((t) => (
+                <a href={`/admin/content/${t.slug}`} class={active === t.slug ? 'on' : ''}>
+                  {t.label}
+                </a>
+              ))}
               <a href="/admin/types" class={active === 'types' ? 'on' : ''}>
-                Content Types
+                + All types
+              </a>
+              <a href="/admin/media" class={active === 'media' ? 'on' : ''}>
+                Media
               </a>
               <div class="sec">Structure</div>
               <a href="/admin/menus" class={active === 'menus' ? 'on' : ''}>
@@ -121,9 +161,20 @@ export const AdminPage: FC<
               <div class="muted" style="font-size:12px">
                 {user.displayName}
               </div>
-              <a href="/admin/logout" style="font-size:12px">
-                Sign out
-              </a>
+              <div style="display:flex;align-items:center;gap:10px;margin-top:6px">
+                <a href="/admin/logout" style="font-size:12px">
+                  Sign out
+                </a>
+                <button
+                  type="button"
+                  id="skelpo-theme-toggle"
+                  title="Toggle light / dark"
+                  style="margin-left:auto;background:transparent;border:1px solid var(--line);color:var(--mut);border-radius:6px;padding:4px 8px;cursor:pointer;font-size:12px;line-height:1"
+                  onclick="(()=>{var d=document.documentElement;var next=d.getAttribute('data-theme')==='light'?'dark':'light';if(next==='light')d.setAttribute('data-theme','light');else d.removeAttribute('data-theme');try{localStorage.setItem('skelpo-theme',next)}catch(e){}document.getElementById('skelpo-theme-icon').textContent=next==='light'?'☾':'☀';})()"
+                >
+                  <span id="skelpo-theme-icon">{/* sun for dark (current), moon for light */}☀</span>
+                </button>
+              </div>
             </div>
           </aside>
           <main class="main">{children}</main>
@@ -133,7 +184,8 @@ export const AdminPage: FC<
       )}
     </body>
   </html>
-);
+  );
+};
 
 export const StatusBadge: FC<{ status: string }> = ({ status }) => {
   const map: Record<string, string> = {
