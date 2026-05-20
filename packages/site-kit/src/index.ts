@@ -30,3 +30,4 @@ export {
 } from './image.js';
 
 export { renderTipTap } from './richtext.js';
+export { renderMarkdown } from './markdown.js';
