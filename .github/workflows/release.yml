@@ -63,16 +63,17 @@ jobs:
           echo "dir=packages/$PKG" >> "$GITHUB_OUTPUT"
           echo "Publishing @skelpo/$PKG@$VER from packages/$PKG"
 
+      # Node 24 ships with npm 11.x, which has Trusted-Publisher OIDC built in.
+      # (Node 22 + `npm i -g npm@latest` self-upgrade is unreliable on CI.)
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
           cache-dependency-path: ${{ steps.meta.outputs.dir }}/package-lock.json
 
-      # npm Trusted Publisher OIDC requires npm ≥ 11.5.1 (Node 22 ships with 10.x).
-      - name: Upgrade npm to a Trusted-Publisher-capable version
+      - name: Log toolchain
         run: |
-          npm install -g npm@latest
+          node --version
           npm --version
 
       - name: Sanity-check tag version against package.json
