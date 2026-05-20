@@ -66,9 +66,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
           cache: npm
           cache-dependency-path: ${{ steps.meta.outputs.dir }}/package-lock.json
+
+      # npm Trusted Publisher OIDC requires npm ≥ 11.5.1 (Node 22 ships with 10.x).
+      - name: Upgrade npm to a Trusted-Publisher-capable version
+        run: |
+          npm install -g npm@latest
+          npm --version
 
       - name: Sanity-check tag version against package.json
         working-directory: ${{ steps.meta.outputs.dir }}
