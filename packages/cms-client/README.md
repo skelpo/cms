@@ -60,24 +60,82 @@ Pass `cache: 'none'` to disable.
 
 For custom caches (Redis, KV, etc.) implement the small `SdkCache` interface.
 
-## API surface
+## Full API surface
+
+Every endpoint the CMS exposes is mirrored as a typed method. Public reads work without a token; mutations require a Bearer API token created via `skelpo-cms tokens create` (or POSTing to `/api/v1/auth/tokens`).
 
 ```ts
-cms.content.list(type, opts)
-cms.content.bySlug(type, slug, opts)
-cms.content.byId(id, opts)
+// Authentication
+cms.auth.login(email, password, totpCode?)
+cms.auth.logout()
+cms.auth.me()
+cms.auth.refresh()
+cms.auth.tokens.list / create({ name, scopes?, ttlDays? }) / revoke(id)
 
-cms.settings.get<T>(key)
-cms.settings.getAll()
+// Content — read + write
+cms.content.list(type, { locale?, limit?, cursor?, sort?, include? })
+cms.content.bySlug(type, slug, { locale?, include? })
+cms.content.byId(id, { include? })
+cms.content.byPath('/blog/hello')
+cms.content.create({ type, slug, locale, title, fields, seo?, ai?, status?, translationOf? })
+cms.content.update(id, patch)
+cms.content.publish(id) / unpublish(id) / delete(id)
 
-cms.menus.get(slug, opts)
+// Content types (registry + schema evolution)
+cms.types.list / get(slug) / revisions(slug)
+cms.types.create({ slug, labelSingular, labelPlural, fieldsSchema, ... })
+cms.types.evolve(slug, patch, { dryRun? })
+cms.types.delete(slug, { force? })
 
-cms.forms.submit(slug, fields)
+// Settings
+cms.settings.all() / get<T>(key) / set(key, value) / setMany({ ... })
 
+// Menus
+cms.menus.list / bySlug(slug, { locale? })
+cms.menus.create({ slug, label })
+cms.menus.update(slug, { label? }) / delete(slug)
+cms.menus.addItem(slug, { label, url, target?, sortOrder?, parentId? })
+cms.menus.updateItem(slug, id, patch) / removeItem(slug, id)
+cms.menus.reorderItems(slug, items)
+
+// Media (storage-agnostic backend: local disk or S3-compatible)
+cms.media.list({ mimeType?, limit? }) / get(id)
+cms.media.rawUrl(id)                       // public URL (302 → CDN if configured)
+cms.media.signedUrl(id, { w, h, format, quality, fit })
+cms.media.upload({ file: Blob, filename, mimeType?, altText, focalPoint? })
+cms.media.update(id, { altText?, focalPoint?, filename? })
+cms.media.delete(id)
+
+// Users + roles
+cms.users.list / create({ email, displayName, password, roleSlug })
+cms.users.update(id, patch) / suspend(id) / unsuspend(id)
+cms.roles.list / create({ slug, label, capabilities }) / update(slug, patch) / delete(slug)
+
+// Redirects
+cms.redirects.list / create({ fromPath, toPath, statusCode? })
+cms.redirects.update(id, patch) / delete(id) / resolve(path)
+
+// Webhooks
+cms.webhooks.list / create({ url, events, secret?, active? })
+cms.webhooks.update(id, patch) / delete(id) / deliveries(id)
+
+// Jobs (queue inspection + retry)
+cms.jobs.stats / list({ status?, limit? }) / get(id) / retry(id)
+
+// Forms
+cms.forms.submit(slug, data)                       // public
+cms.forms.submissions(slug, { limit? })            // authed
+cms.forms.deleteSubmission(id) / markSpam(id)
+
+// Webhook receiver (server side)
 webhookHandler({ secret, onEvent })
 ```
 
-All response bodies are typed `ContentPublic<TFields>`, `SeoFields`, `MenuTree`, etc. — see [`./dist/index.d.ts`](./dist/index.d.ts).
+All response bodies are typed: `ContentPublic<TFields>`, `MediaRow`, `UserRow`, `MenuTree`, `JobRow`, `ApiTokenCreated`, etc. — see [`./dist/index.d.ts`](./dist/index.d.ts) for the full set.
+
+## Writes + cache invalidation
+
+When `cache: 'auto'` is set and a write op runs in-process, the client invalidates cached reads of the affected resource (`GET:/content`, `GET:/menus`, etc.). Cross-process invalidation should still come via webhooks — wire `webhookHandler` to forward `surrogate-key` deps to `cms.invalidate(deps)`.
 
 ## Compatibility
 
