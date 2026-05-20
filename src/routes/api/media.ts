@@ -8,6 +8,7 @@ import {
   updateMedia,
   deleteMedia,
   readMediaBytes,
+  mediaPublicUrl,
 } from '../../media/store.js';
 import { signedImgproxyUrl, type TransformOpts } from '../../media/imgproxy.js';
 import { getSiteUrl } from '../../settings/store.js';
@@ -60,6 +61,10 @@ mediaRoutes.get('/:id{[0-9]+}', async (c) => {
 mediaRoutes.get('/:id{[0-9]+}/raw', async (c) => {
   const m = await getMedia(Number(c.req.param('id')));
   if (!m) return errorResponse(c, 'notFound', 'Media not found', 404);
+  // Backend exposes the file directly (public S3 bucket or CDN)?
+  // 302-redirect there so the CMS stays out of the byte path.
+  const direct = mediaPublicUrl(m);
+  if (direct) return c.redirect(direct, 302);
   const bytes = await readMediaBytes(m);
   return new Response(bytes as BodyInit, {
     headers: {

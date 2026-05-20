@@ -13,6 +13,7 @@ import { userRoutes, roleRoutes } from './routes/api/users.js';
 import { redirectRoutes } from './routes/api/redirects.js';
 import { formRoutes } from './routes/api/forms.js';
 import { mediaRoutes } from './routes/api/media.js';
+import { jobsRoutes } from './routes/api/jobs.js';
 import { adminRoutes } from './admin/routes.js';
 import { attachAuthContext } from './auth/middleware.js';
 
@@ -44,6 +45,7 @@ api.route('/roles', roleRoutes);
 api.route('/redirects', redirectRoutes);
 api.route('/forms', formRoutes);
 api.route('/media', mediaRoutes);
+api.route('/jobs', jobsRoutes);
 app.route('/api/v1', api);
 
 // Admin UI (HTMX, server-rendered).

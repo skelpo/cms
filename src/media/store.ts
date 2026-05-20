@@ -1,11 +1,10 @@
-// Media storage. v0.1 = local disk backend (config.media.localPath).
-// S3 is a config-selectable follow-up. Metadata in the `media` table;
-// bytes on disk under <storage>/<yyyymm>/<hex>-<filename>.
+// Media metadata layer. Bytes go through `MediaStorage` (local disk or
+// S3/R2/B2/MinIO); this file only cares about the row in `media` and the
+// derived `storageKey` (yyyymm/randomhex-filename). The backend is
+// selected by `MEDIA_BACKEND` env (see ./storage.ts).
 
-import { mkdir, writeFile, readFile, unlink } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
 import { execute, query, queryOne } from '../db/client.js';
-import { config } from '../config.js';
+import { mediaStorage } from './storage.js';
 
 export interface MediaRow {
   id: number;
@@ -87,9 +86,7 @@ export interface UploadInput {
 export async function storeMedia(input: UploadInput): Promise<MediaRow> {
   const ym = new Date().toISOString().slice(0, 7).replace('-', '');
   const key = `${ym}/${randomHex(8)}-${sanitize(input.filename)}`;
-  const abs = join(config.media.localPath, key);
-  await mkdir(dirname(abs), { recursive: true });
-  await writeFile(abs, input.bytes);
+  await mediaStorage().put(key, input.bytes, input.mimeType);
   const { w, h } = sniffDimensions(input.bytes, input.mimeType);
   const r = await execute(
     `INSERT INTO \`media\`
@@ -124,7 +121,13 @@ export async function getMedia(id: number): Promise<MediaRow | null> {
 }
 
 export async function readMediaBytes(row: MediaRow): Promise<Uint8Array> {
-  return new Uint8Array(await readFile(join(config.media.localPath, row.storageKey)));
+  return mediaStorage().get(row.storageKey);
+}
+
+/** Direct URL the public can hit (e.g., S3 + CDN), or null if bytes must
+ *  be proxied through the CMS. Caller decides whether to 302 or stream. */
+export function mediaPublicUrl(row: MediaRow): string | null {
+  return mediaStorage().publicUrl(row.storageKey);
 }
 
 export async function listMedia(opts: { mimeType?: string; limit?: number } = {}): Promise<MediaRow[]> {
@@ -163,7 +166,7 @@ export async function deleteMedia(id: number): Promise<boolean> {
   if (!row) return false;
   const r = await execute('DELETE FROM `media` WHERE `id`=?', [id]);
   if (r.affectedRows > 0) {
-    try { await unlink(join(config.media.localPath, row.storageKey)); } catch { /* file already gone */ }
+    await mediaStorage().delete(row.storageKey);
     return true;
   }
   return false;
