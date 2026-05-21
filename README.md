@@ -173,6 +173,28 @@ These are CI-gated. PRs that break them fail. Numbers are on Perry; Node/Bun are
 | Native deps | PHP + ext | Node + 1000 npm | Node + 800 npm + Sharp | Node + Next + 1500 npm | **just imgproxy** |
 | Static export built-in | No | No | No | No | **Yes** |
 
+### Measured — Node vs Perry (direct head-to-head)
+
+Identical Fastify source, same machine (M-series Mac), same harness
+(`autocannon`, 50 conns × 20 s). Full writeup +
+[scripts/bench-twin/](scripts/bench-twin/) reproducer in
+[docs/benchmarks-perry-vs-node.md](docs/benchmarks-perry-vs-node.md);
+deployed-CMS end-to-end numbers in [docs/benchmarks.md](docs/benchmarks.md).
+
+| Axis | Node + tsx | Perry native | Δ |
+|---|---:|---:|---:|
+| Cold start (spawn → 200) | 730 ms | **44 ms** | ≈17× faster |
+| RPS, /loop (CPU bound) | 49,947 | **67,197** | +35% |
+| RPS, /json (1KB serialize) | 53,498 | **65,766** | +23% |
+| RPS, /healthz (tiny JSON) | 58,522 | **65,723** | +12% |
+| RSS, idle | 86 MB | **11 MB** | ≈8× smaller |
+| Distributable | ~105 MB (node + node_modules) | **3.5 MB** binary | ≈30× smaller |
+
+Responses are byte-identical (md5-verified). Throughput is +20% on
+average at this concurrency; the lopsided wins are cold start (≈17×),
+idle memory (≈8×), and deployable size (≈30×) — the axes that matter
+for autoscale-from-zero, FaaS, and edge/CLI shapes.
+
 ---
 
 ## Data model

@@ -10,6 +10,10 @@ build/
 # Dependencies
 node_modules/
 
+# Perry build artifacts (incremental cache + JS-bundle scratch)
+.perry-cache/
+__perry_js_bundle.js
+
 # Local config / secrets
 .env
 .env.local

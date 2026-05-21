@@ -1,0 +1,6 @@
+{
+  "entry": "src/server.ts",
+  "output": "dist/bench-twin",
+  "target": "native",
+  "compilePackages": ["hono", "marked"]
+}
