@@ -7,17 +7,20 @@
 
 import type { FC, PropsWithChildren } from 'hono/jsx';
 import { listTypes } from '../content/types.js';
+import type { RoleCapabilities } from '../auth/users.js';
+import { can, type Action } from '../permissions/check.js';
 
-// Custom content types (not built-in: page/post/doc) get listed in the
-// sidebar dynamically. Cached on the registry's existing invalidation
-// path (listTypes is itself cached + invalidated on type CRUD).
-async function customTypes(): Promise<{ slug: string; label: string }[]> {
-  try {
-    const all = await listTypes();
-    return all
-      .filter((t) => !['page', 'post', 'doc', 'form', 'errorPage'].includes(t.slug))
-      .map((t) => ({ slug: t.slug, label: t.labelPlural }));
-  } catch { return []; }
+// Caps-aware sidebar items. Each entry knows what permission it needs;
+// the renderer drops items the current user can't action on.
+function visibleTypes(allCaps: RoleCapabilities, types: { slug: string; labelPlural: string }[]): { slug: string; label: string }[] {
+  return types
+    .filter((t) => !['page', 'post', 'doc', 'form', 'errorPage'].includes(t.slug))
+    .filter((t) => can({ userId: 0, caps: allCaps }, 'read', t.slug))
+    .map((t) => ({ slug: t.slug, label: t.labelPlural }));
+}
+
+function has(caps: RoleCapabilities, action: Action, typeSlug?: string): boolean {
+  return can({ userId: 0, caps }, action, typeSlug);
 }
 
 const CSS = `
@@ -76,9 +79,42 @@ padding:10px 12px;border-radius:7px;margin:10px 0;font-size:13px}
 `;
 
 export const AdminPage: FC<
-  PropsWithChildren<{ title: string; active?: string; user?: { displayName: string } | null }>
-> = async ({ title, active, user, children }) => {
-  const extras = user ? await customTypes() : [];
+  PropsWithChildren<{
+    title: string;
+    active?: string;
+    user?: { displayName: string; roleSlug?: string } | null;
+    /** Role capabilities — drives sidebar gating. Falls back to no-access. */
+    caps?: RoleCapabilities;
+  }>
+> = async ({ title, active, user, caps, children }) => {
+  // Treat missing caps as "no access" so the sidebar stays empty rather
+  // than leaking everything. Authed pages should always pass caps.
+  const c = caps ?? { global: [], types: {} };
+  const allTypes = user ? await listTypes().catch(() => []) : [];
+  const customTypes = visibleTypes(c, allTypes);
+  // Built-in editorial types only show if the user can read them.
+  const showPages = user && has(c, 'read', 'page');
+  const showPosts = user && has(c, 'read', 'post');
+  const showDocs  = user && has(c, 'read', 'doc');
+
+  // Developer-only areas
+  const canManageTypes     = user && has(c, 'manageTypes');
+  const canManageMenus     = user && has(c, 'manageMenus');
+  const canManageRedirects = user && has(c, 'manageRedirects');
+  const canManageSettings  = user && has(c, 'manageSettings');
+  const canManageUsers     = user && has(c, 'manageUsers');
+  const canManageJobs      = user && has(c, 'manageJobs');
+  const canManageForms     = user && has(c, 'manageForms');
+  // Webhooks gated under manageSettings today; promote to its own cap later.
+  const canManageWebhooks  = canManageSettings;
+
+  // Editorial-only areas
+  const canViewMedia        = user && (has(c, 'manageMedia') || has(c, 'read', 'page')); // media library is editorial
+  const canViewSubmissions  = user && (has(c, 'viewSubmissions') || has(c, 'manageForms'));
+
+  // Has any developer link to show?
+  const hasDeveloperArea = canManageTypes || canManageForms || canManageRedirects ||
+    canManageSettings || canManageUsers || canManageJobs || canManageWebhooks;
   return (
   <html lang="en">
     <head>
@@ -109,57 +145,38 @@ export const AdminPage: FC<
               Skelpo<b>CMS</b>
             </div>
             <nav class="nav">
-              <a href="/admin" class={active === 'dashboard' ? 'on' : ''}>
-                Dashboard
-              </a>
-              <div class="sec">Content</div>
-              <a href="/admin/content/page" class={active === 'page' ? 'on' : ''}>
-                Pages
-              </a>
-              <a href="/admin/content/post" class={active === 'post' ? 'on' : ''}>
-                Posts
-              </a>
-              <a href="/admin/content/doc" class={active === 'doc' ? 'on' : ''}>
-                Docs
-              </a>
-              {extras.map((t) => (
-                <a href={`/admin/content/${t.slug}`} class={active === t.slug ? 'on' : ''}>
-                  {t.label}
-                </a>
+              <a href="/admin" class={active === 'dashboard' ? 'on' : ''}>Dashboard</a>
+
+              {/* ── Editorial ─────────────────────────────────── */}
+              <div class="sec">Editorial</div>
+              {showPages ? <a href="/admin/content/page" class={active === 'page' ? 'on' : ''}>Pages</a> : null}
+              {showPosts ? <a href="/admin/content/post" class={active === 'post' ? 'on' : ''}>Posts</a> : null}
+              {showDocs  ? <a href="/admin/content/doc"  class={active === 'doc'  ? 'on' : ''}>Docs</a>  : null}
+              {customTypes.map((t) => (
+                <a href={`/admin/content/${t.slug}`} class={active === t.slug ? 'on' : ''}>{t.label}</a>
               ))}
-              <a href="/admin/types" class={active === 'types' ? 'on' : ''}>
-                + All types
-              </a>
-              <a href="/admin/media" class={active === 'media' ? 'on' : ''}>
-                Media
-              </a>
-              <div class="sec">Structure</div>
-              <a href="/admin/menus" class={active === 'menus' ? 'on' : ''}>
-                Menus
-              </a>
-              <a href="/admin/redirects" class={active === 'redirects' ? 'on' : ''}>
-                Redirects
-              </a>
-              <a href="/admin/forms" class={active === 'forms' ? 'on' : ''}>
-                Forms
-              </a>
-              <div class="sec">System</div>
-              <a href="/admin/settings" class={active === 'settings' ? 'on' : ''}>
-                Settings
-              </a>
-              <a href="/admin/users" class={active === 'users' ? 'on' : ''}>
-                Users
-              </a>
-              <a href="/admin/jobs" class={active === 'jobs' ? 'on' : ''}>
-                Jobs
-              </a>
-              <a href="/admin/webhooks" class={active === 'webhooks' ? 'on' : ''}>
-                Webhooks
-              </a>
+              {canViewMedia ? <a href="/admin/media" class={active === 'media' ? 'on' : ''}>Media</a> : null}
+              {canManageMenus ? <a href="/admin/menus" class={active === 'menus' ? 'on' : ''}>Menus</a> : null}
+              {canViewSubmissions ? <a href="/admin/forms" class={active === 'forms' ? 'on' : ''}>Form submissions</a> : null}
+
+              {/* ── Developer / admin ─────────────────────────── */}
+              {hasDeveloperArea ? <div class="sec">Developer</div> : null}
+              {canManageTypes     ? <a href="/admin/types"     class={active === 'types'     ? 'on' : ''}>Content Types</a> : null}
+              {canManageForms     ? <a href="/admin/forms"     class={active === 'forms-admin' ? 'on' : ''}>Forms (admin)</a> : null}
+              {canManageRedirects ? <a href="/admin/redirects" class={active === 'redirects' ? 'on' : ''}>Redirects</a> : null}
+              {canManageWebhooks  ? <a href="/admin/webhooks"  class={active === 'webhooks'  ? 'on' : ''}>Webhooks</a> : null}
+              {canManageJobs      ? <a href="/admin/jobs"      class={active === 'jobs'      ? 'on' : ''}>Jobs</a> : null}
+              {canManageSettings  ? <a href="/admin/settings"  class={active === 'settings'  ? 'on' : ''}>Settings</a> : null}
+              {canManageUsers     ? <a href="/admin/users"     class={active === 'users'     ? 'on' : ''}>Users</a> : null}
             </nav>
             <div style="margin-top:auto;padding:14px 10px 0;border-top:1px solid var(--line)">
-              <div class="muted" style="font-size:12px">
-                {user.displayName}
+              <div class="muted" style="font-size:12px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                <span>{user.displayName}</span>
+                {(user as { roleSlug?: string }).roleSlug ? (
+                  <span style="background:var(--panel2);color:var(--acc2);font-size:10px;text-transform:uppercase;letter-spacing:0.05em;padding:1px 6px;border-radius:4px;font-weight:600">
+                    {(user as { roleSlug?: string }).roleSlug}
+                  </span>
+                ) : null}
               </div>
               <div style="display:flex;align-items:center;gap:10px;margin-top:6px">
                 <a href="/admin/logout" style="font-size:12px">

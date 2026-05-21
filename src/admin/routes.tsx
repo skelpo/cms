@@ -122,24 +122,76 @@ adminRoutes.get('/logout', async (c) => {
 adminRoutes.get('/', async (c) => {
   const auth = gate(c);
   if (auth instanceof Response) return auth;
+  const canManageSettings = can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageSettings');
 
-  const [pages, posts, docs, users, jobsByStatus] = await Promise.all([
+  const [pages, posts, docs, users, jobsByStatus, maintRow, previewRow, siteUrlRow] = await Promise.all([
     queryOne<{ n: number }>("SELECT COUNT(*) n FROM `content` WHERE `typeSlug`='page'"),
     queryOne<{ n: number }>("SELECT COUNT(*) n FROM `content` WHERE `typeSlug`='post'"),
     queryOne<{ n: number }>("SELECT COUNT(*) n FROM `content` WHERE `typeSlug`='doc'"),
     queryOne<{ n: number }>('SELECT COUNT(*) n FROM `users`'),
     jobStats(),
+    queryOne<{ value: unknown }>("SELECT `value` FROM `settings` WHERE `keyName` = 'site.maintenance'"),
+    queryOne<{ value: unknown }>("SELECT `value` FROM `settings` WHERE `keyName` = 'site.previewToken'"),
+    queryOne<{ value: unknown }>("SELECT `value` FROM `settings` WHERE `keyName` = 'site.url'"),
   ]);
+  const maintenanceOn = maintRow?.value === true;
+  const previewToken = typeof previewRow?.value === 'string' ? previewRow.value : null;
+  const siteUrl = typeof siteUrlRow?.value === 'string' ? siteUrlRow.value : '';
+  const previewLink = siteUrl && previewToken ? `${siteUrl.replace(/\/+$/, '')}/?preview=${encodeURIComponent(previewToken)}` : null;
+  const flash = c.req.query('ok');
+
   const recent = await query<{ id: number; title: string; typeSlug: string; status: string; updatedAt: unknown }>(
     'SELECT `id`,`title`,`typeSlug`,`status`,`updatedAt` FROM `content` ORDER BY `updatedAt` DESC LIMIT 8',
   );
 
   return c.html(
-    <AdminPage title="Dashboard" active="dashboard" user={auth.user}>
+    <AdminPage title="Dashboard" active="dashboard" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <div class="top">
         <h1>Dashboard</h1>
         <span class="muted">Signed in as {auth.user.displayName}</span>
       </div>
+      {flash ? <div class="ok">{decodeURIComponent(flash)}</div> : null}
+
+      {/* Maintenance status — prominent if on, low-key if off. Hidden for
+          users without manageSettings (matches sidebar gating). */}
+      {canManageSettings ? (
+        <div class="card" style={`margin-bottom:18px;${maintenanceOn
+          ? 'border-color:#f59e0b;background:linear-gradient(0deg,rgba(245,158,11,.08),rgba(245,158,11,.08))'
+          : ''}`}>
+          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+            <div style={`width:10px;height:10px;border-radius:999px;background:${maintenanceOn ? '#f59e0b' : '#34d399'};box-shadow:0 0 0 4px ${maintenanceOn ? 'rgba(245,158,11,.18)' : 'rgba(52,211,153,.16)'};flex-shrink:0`} />
+            <div style="flex:1;min-width:240px">
+              <div style="font-weight:600;font-size:14px">
+                Maintenance mode: <span style={`color:${maintenanceOn ? 'var(--acc2)' : 'var(--ok)'}`}>{maintenanceOn ? 'ON' : 'OFF'}</span>
+              </div>
+              <div class="muted" style="font-size:12px;margin-top:3px">
+                {maintenanceOn
+                  ? 'The public site is showing a "we\'ll be right back" page. Admins with the preview link still get through.'
+                  : 'The public site is live and serving traffic normally.'}
+              </div>
+            </div>
+            <form method="post" action="/admin/maintenance/toggle" style="margin:0">
+              <button class="btn" type="submit" style={maintenanceOn ? 'background:var(--ok);color:#06281c' : ''}>
+                {maintenanceOn ? 'Turn maintenance OFF' : 'Turn maintenance ON'}
+              </button>
+            </form>
+          </div>
+          {maintenanceOn && previewLink ? (
+            <div style="margin-top:12px;padding:10px 12px;background:var(--panel2);border-radius:6px;font-size:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+              <span class="muted">Preview link (share with admins so they can still browse):</span>
+              <code style="background:var(--bg);padding:4px 8px;border-radius:4px;flex:1;min-width:300px;overflow:auto;font-size:11px">{previewLink}</code>
+              <form method="post" action="/admin/maintenance/rotate-token" style="margin:0">
+                <button class="btn sm sec" type="submit" title="Rotate the preview token; old links stop working">Rotate</button>
+              </form>
+            </div>
+          ) : null}
+          <div class="muted" style="font-size:11px;margin-top:10px;line-height:1.5">
+            Edit the message shown to visitors:{' '}
+            <a href="/admin/settings/site.maintenanceTitle">Title</a> · <a href="/admin/settings/site.maintenanceMessage">Body</a>
+          </div>
+        </div>
+      ) : null}
+
       <div class="grid g4">
         <div class="card">
           <div class="stat">{pages?.n ?? 0}</div>
@@ -195,6 +247,45 @@ adminRoutes.get('/', async (c) => {
   );
 });
 
+// ── Maintenance: toggle + rotate preview token ─────────────────────────
+
+import { setSetting, invalidateSettingsCache } from '../settings/store.js';
+
+adminRoutes.post('/maintenance/toggle', async (c) => {
+  const auth = gate(c);
+  if (auth instanceof Response) return auth;
+  if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageSettings')) {
+    return c.redirect('/admin?ok=' + encodeURIComponent('Permission denied (manageSettings required).'), 302);
+  }
+  const current = await queryOne<{ value: unknown }>(
+    "SELECT `value` FROM `settings` WHERE `keyName` = 'site.maintenance'",
+  );
+  const next = !(current?.value === true);
+  await setSetting('site.maintenance', next, auth.user.id);
+  invalidate(['setting:site.maintenance']);
+  invalidateSettingsCache();
+  return c.redirect('/admin?ok=' + encodeURIComponent(
+    next ? 'Maintenance mode is now ON.' : 'Maintenance mode is now OFF.',
+  ), 302);
+});
+
+adminRoutes.post('/maintenance/rotate-token', async (c) => {
+  const auth = gate(c);
+  if (auth instanceof Response) return auth;
+  if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageSettings')) {
+    return c.redirect('/admin', 302);
+  }
+  // 32 url-safe random chars (≈192 bits).
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  const tok = btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+  await setSetting('site.previewToken', tok, auth.user.id);
+  invalidate(['setting:site.previewToken']);
+  invalidateSettingsCache();
+  return c.redirect('/admin?ok=' + encodeURIComponent('Preview token rotated. Old preview links no longer work.'), 302);
+});
+
 // ── Content types index ────────────────────────────────────────────────
 
 adminRoutes.get('/types', async (c) => {
@@ -211,7 +302,7 @@ adminRoutes.get('/types', async (c) => {
     counts.set(t.slug, r?.n ?? 0);
   }
   return c.html(
-    <AdminPage title="Content Types" active="types" user={auth.user}>
+    <AdminPage title="Content Types" active="types" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <div class="top">
         <h1>Content Types</h1>
         <span class="muted">{types.length} types</span>
@@ -254,7 +345,7 @@ adminRoutes.get('/content/:type', async (c) => {
   const typeSlug = c.req.param('type');
   const types = await listTypes();
   const t = types.find((x) => x.slug === typeSlug);
-  if (!t) return c.html(<AdminPage title="Not found" user={auth.user}>Unknown type</AdminPage>, 404);
+  if (!t) return c.html(<AdminPage title="Not found" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>Unknown type</AdminPage>, 404);
 
   // Locale filter — defaults to en. "all" shows every locale (useful for
   // diffing translation coverage). Available locales come from site.locales.
@@ -280,7 +371,7 @@ adminRoutes.get('/content/:type', async (c) => {
   });
 
   return c.html(
-    <AdminPage title={t.labelPlural} active={typeSlug} user={auth.user}>
+    <AdminPage title={t.labelPlural} active={typeSlug} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <div class="top">
         <h1>{t.labelPlural}</h1>
         <a class="btn" href={`/admin/content/${typeSlug}/new`}>
@@ -361,9 +452,9 @@ adminRoutes.get('/content/:type/new', async (c) => {
   const auth = gate(c);
   if (auth instanceof Response) return auth;
   const t = await getTypeBySlug(c.req.param('type'));
-  if (!t) return c.html(<AdminPage title="404" user={auth.user}>Unknown type</AdminPage>, 404);
+  if (!t) return c.html(<AdminPage title="404" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>Unknown type</AdminPage>, 404);
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'create', t.slug)) {
-    return c.html(<AdminPage title="Forbidden" user={auth.user}>No create permission for {t.slug}</AdminPage>, 403);
+    return c.html(<AdminPage title="Forbidden" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>No create permission for {t.slug}</AdminPage>, 403);
   }
 
   // If creating a translation of an existing row, pre-populate slug + title
@@ -397,7 +488,7 @@ adminRoutes.get('/content/:type/new', async (c) => {
       type={t}
       fields={{}}
       seo={{}}
-      user={auth.user}
+      user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}
       siblings={siblings}
       availableLocales={availableLocales}
       translationOf={translationOf}
@@ -414,9 +505,9 @@ adminRoutes.get('/content/:type/:id{[0-9]+}', async (c) => {
   const auth = gate(c);
   if (auth instanceof Response) return auth;
   const t = await getTypeBySlug(c.req.param('type'));
-  if (!t) return c.html(<AdminPage title="404" user={auth.user}>Unknown type</AdminPage>, 404);
+  if (!t) return c.html(<AdminPage title="404" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>Unknown type</AdminPage>, 404);
   const row = await findById(Number(c.req.param('id')), true);
-  if (!row) return c.html(<AdminPage title="404" user={auth.user}>Not found</AdminPage>, 404);
+  if (!row) return c.html(<AdminPage title="404" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>Not found</AdminPage>, 404);
   const fields = typeof row.fields === 'string' ? JSON.parse(row.fields) : row.fields;
   const seo = typeof row.seo === 'string' ? JSON.parse(row.seo) : row.seo;
   const flash = c.req.query('ok')
@@ -440,7 +531,7 @@ adminRoutes.get('/content/:type/:id{[0-9]+}', async (c) => {
       row={row}
       fields={fields}
       seo={seo}
-      user={auth.user}
+      user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}
       flash={flash}
       siblings={siblings}
       availableLocales={availableLocales}
@@ -460,9 +551,9 @@ adminRoutes.post('/content/:type', async (c) => {
   const auth = gate(c);
   if (auth instanceof Response) return auth;
   const t = await getTypeBySlug(c.req.param('type'));
-  if (!t) return c.html(<AdminPage title="404" user={auth.user}>Unknown type</AdminPage>, 404);
+  if (!t) return c.html(<AdminPage title="404" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>Unknown type</AdminPage>, 404);
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'create', t.slug)) {
-    return c.html(<AdminPage title="Forbidden" user={auth.user}>No create permission</AdminPage>, 403);
+    return c.html(<AdminPage title="Forbidden" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>No create permission</AdminPage>, 403);
   }
   const body = await c.req.parseBody();
   const p = parseContentForm(body, t.fieldsSchema.fields);
@@ -507,9 +598,9 @@ adminRoutes.post('/content/:type/:id{[0-9]+}', async (c) => {
   if (auth instanceof Response) return auth;
   const t = await getTypeBySlug(c.req.param('type'));
   const id = Number(c.req.param('id'));
-  if (!t) return c.html(<AdminPage title="404" user={auth.user}>Unknown type</AdminPage>, 404);
+  if (!t) return c.html(<AdminPage title="404" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>Unknown type</AdminPage>, 404);
   const existing = await findById(id, true);
-  if (!existing) return c.html(<AdminPage title="404" user={auth.user}>Not found</AdminPage>, 404);
+  if (!existing) return c.html(<AdminPage title="404" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>Not found</AdminPage>, 404);
 
   const body = await c.req.parseBody();
   const p = parseContentForm(body, t.fieldsSchema.fields);

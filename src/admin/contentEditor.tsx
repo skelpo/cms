@@ -456,7 +456,8 @@ export const ContentForm: FC<{
   row?: ContentDbRow | null;
   fields: Record<string, unknown>;
   seo: Record<string, unknown>;
-  user: { displayName: string };
+  user: { displayName: string; roleSlug?: string };
+  caps?: import('../auth/users.js').RoleCapabilities;
   flash?: { ok?: string; err?: string };
   /** Existing translations of this row, by locale. Used to render locale tabs. */
   siblings?: TranslationSibling[];
@@ -469,7 +470,7 @@ export const ContentForm: FC<{
   defaultSlug?: string;
   defaultLocale?: string;
 }> = ({
-  type, row, fields, seo, user, flash,
+  type, row, fields, seo, user, caps, flash,
   siblings, availableLocales, translationOf, defaultTitle, defaultSlug, defaultLocale,
 }) => {
   const isNew = !row;
@@ -490,6 +491,7 @@ export const ContentForm: FC<{
       title={isNew ? `New ${type.labelSingular}` : row!.title}
       active={type.slug}
       user={user}
+      caps={caps}
     >
       {/* EasyMDE for richtext fields + repeater add/remove + form serialize. */}
       <link rel="stylesheet" href="/admin/static/easymde/easymde.min.css" />

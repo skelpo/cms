@@ -23,8 +23,15 @@ const BUILTIN_ROLES = [
     slug: 'editor',
     label: 'Editor',
     capabilities: {
-      global: [],
-      types: { '*': ['read', 'create', 'update', 'delete', 'publish', 'readDrafts'] },
+      // Editors moderate form submissions (mark spam, delete) but don't
+      // create form definitions — those require template integration.
+      global: ['viewSubmissions'],
+      types: {
+        '*':  ['read', 'create', 'update', 'delete', 'publish', 'readDrafts'],
+        // Form definitions need a developer to wire them into a template;
+        // editors can read + tweak labels but shouldn't spawn new ones.
+        form: ['read', 'update', 'publish', 'readDrafts'],
+      },
     },
   },
   {

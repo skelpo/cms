@@ -27,6 +27,7 @@ export type Action =
   | 'manageRedirects'
   | 'manageMedia'
   | 'manageForms'
+  | 'viewSubmissions'   // read + moderate form submissions w/o the definition UI
   | 'viewAnalytics'
   | 'viewAuditLog'
   | 'exportData'
@@ -41,6 +42,7 @@ const GLOBAL_ACTIONS = new Set<Action>([
   'manageRedirects',
   'manageMedia',
   'manageForms',
+  'viewSubmissions',
   'viewAnalytics',
   'viewAuditLog',
   'exportData',

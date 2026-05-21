@@ -5,7 +5,7 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import type { FC } from 'hono/jsx';
-import { AdminPage } from './layout.js';
+import { AdminPage, StatusBadge } from './layout.js';
 import type { AuthContext } from '../auth/middleware.js';
 import { can } from '../permissions/check.js';
 import { getAllSettings, setSetting, invalidateSettingsCache } from '../settings/store.js';
@@ -75,7 +75,7 @@ adminScreens.get('/settings', async (c) => {
   }
 
   return c.html(
-    <AdminPage title="Settings" active="settings" user={auth.user}>
+    <AdminPage title="Settings" active="settings" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <div class="top">
         <h1>Settings</h1>
         <span class="muted">{Object.keys(all).length} settings · {groups.size} groups</span>
@@ -167,14 +167,14 @@ adminScreens.get('/settings/:keyName', async (c) => {
   const keyName = decodeURIComponent(c.req.param('keyName'));
   const all = await getAllSettings();
   if (!(keyName in all)) {
-    return c.html(<AdminPage title="Not found" user={auth.user}>Setting <code>{keyName}</code> not found.</AdminPage>, 404);
+    return c.html(<AdminPage title="Not found" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>Setting <code>{keyName}</code> not found.</AdminPage>, 404);
   }
   const value = all[keyName];
   const shape = shapeOf(value);
   const flash = c.req.query('ok') ? { ok: decodeURIComponent(c.req.query('ok')!) } : undefined;
 
   return c.html(
-    <AdminPage title={keyName} active="settings" user={auth.user}>
+    <AdminPage title={keyName} active="settings" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <div class="top">
         <h1 style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:18px">{keyName}</h1>
         <a class="btn sec" href="/admin/settings">← All settings</a>
@@ -401,7 +401,7 @@ adminScreens.get('/media', async (c) => {
   const items = await listMedia({ ...(filter ? { mimeType: filter } : {}), limit: 200 });
 
   return c.html(
-    <AdminPage title="Media" active="media" user={auth.user}>
+    <AdminPage title="Media" active="media" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <style dangerouslySetInnerHTML={{ __html: MEDIA_CSS }} />
       <div class="top">
         <h1>Media</h1>
@@ -499,11 +499,11 @@ adminScreens.get('/media/:id{[0-9]+}', async (c) => {
   const auth = gate(c);
   if (auth instanceof Response) return auth;
   const m = await getMedia(Number(c.req.param('id')));
-  if (!m) return c.html(<AdminPage title="Not found" user={auth.user}>Media not found.</AdminPage>, 404);
+  if (!m) return c.html(<AdminPage title="Not found" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>Media not found.</AdminPage>, 404);
   const altObj = (typeof m.altText === 'object' && m.altText !== null ? m.altText : {}) as Record<string, string>;
 
   return c.html(
-    <AdminPage title={m.filename} active="media" user={auth.user}>
+    <AdminPage title={m.filename} active="media" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <style dangerouslySetInnerHTML={{ __html: MEDIA_CSS }} />
       <div class="top">
         <h1 style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:16px">{m.filename}</h1>
@@ -629,6 +629,228 @@ adminScreens.get('/media/picker', async (c) => {
   );
 });
 
+// ── Forms ──────────────────────────────────────────────────────────────
+// Forms ARE content rows of type `form`; submissions live in their own
+// `formSubmissions` table referencing form.id. This screen wraps both:
+// the list lives next to the submission counts, click a form to see
+// what's come in.
+
+adminScreens.get('/forms', async (c) => {
+  const auth = gate(c);
+  if (auth instanceof Response) return auth;
+  const canManageForms = need(c, auth, 'manageForms');
+  const canViewSubs    = canManageForms || need(c, auth, 'viewSubmissions');
+  if (!canViewSubs) {
+    return c.html(
+      <AdminPage title="Forms" active="forms" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
+        <div class="card" style="text-align:center;padding:30px">
+          <p class="muted">You don't have access to forms. Ask an admin for the <code>viewSubmissions</code> or <code>manageForms</code> capability.</p>
+        </div>
+      </AdminPage>,
+      403,
+    );
+  }
+
+  // Form definitions are content rows (one per locale; show default
+  // locale only for the list).
+  const defaultLocale = (await queryOne<{ value: unknown }>(
+    "SELECT `value` FROM `settings` WHERE `keyName` = 'site.defaultLocale'",
+  ))?.value;
+  const localeFilter = typeof defaultLocale === 'string'
+    ? defaultLocale.replace(/^"|"$/g, '')
+    : (Array.isArray(defaultLocale) ? defaultLocale[0] : 'en');
+
+  const forms = await query<{ id: number; slug: string; title: string; status: string; locale: string }>(
+    `SELECT \`id\`, \`slug\`, \`title\`, \`status\`, \`locale\`
+       FROM \`content\` WHERE \`typeSlug\` = 'form' AND \`locale\` = ?
+      ORDER BY \`title\``,
+    [localeFilter],
+  );
+
+  // Submission + spam counts in one round-trip.
+  const counts = await query<{ formId: number; total: number; spam: number }>(
+    `SELECT \`formId\`, COUNT(*) AS total, SUM(\`isSpam\`) AS spam
+       FROM \`formSubmissions\` GROUP BY \`formId\``,
+  );
+  const cMap = new Map(counts.map((c) => [c.formId, c]));
+
+  return c.html(
+    <AdminPage title="Forms" active="forms" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
+      <div class="top">
+        <h1>Forms</h1>
+        {canManageForms ? <a class="btn" href="/admin/content/form/new">+ New form</a> : null}
+      </div>
+      <div class="card">
+        {forms.length === 0 ? (
+          <div class="muted" style="text-align:center;padding:30px;font-size:13px;line-height:1.6">
+            {canManageForms ? (
+              <>
+                <div>No forms yet.</div>
+                <div style="margin-top:10px">
+                  <a class="btn" href="/admin/content/form/new">Create your first form</a>
+                </div>
+                <div style="margin-top:14px;font-size:12px;color:var(--mut)">
+                  A form is a content row (slug = its public name). Submit to it at <code style="background:var(--panel2);padding:2px 6px;border-radius:4px">POST /api/v1/forms/&lt;slug&gt;/submit</code>.
+                  <br />Note: a form needs template integration before it appears on the site.
+                </div>
+              </>
+            ) : (
+              <>
+                <div>No forms set up yet.</div>
+                <div style="margin-top:10px;font-size:12px">
+                  Forms are created by your developer. Submissions to existing forms will appear here.
+                </div>
+              </>
+            )}
+          </div>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>Title</th>
+                <th>Slug</th>
+                <th>Status</th>
+                <th>Submissions</th>
+                <th>Spam</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {forms.map((f) => {
+                const c = cMap.get(f.id);
+                return (
+                  <tr>
+                    <td><a href={`/admin/forms/${f.slug}`}>{f.title}</a></td>
+                    <td class="muted">{f.slug}</td>
+                    <td><StatusBadge status={f.status} /></td>
+                    <td>{c ? c.total : 0}</td>
+                    <td class="muted">{c?.spam ?? 0}</td>
+                    <td>{canManageForms ? <a class="muted" style="font-size:12px" href={`/admin/content/form/${f.id}`}>Edit definition →</a> : null}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+      <div class="muted" style="font-size:12px;margin-top:10px;line-height:1.6">
+        Submissions can be fetched programmatically:
+        {' '}<code style="background:var(--panel2);padding:2px 6px;border-radius:4px">GET /api/v1/forms/&lt;slug&gt;/submissions</code>
+        {' '}(requires <code>manageForms</code> capability).
+      </div>
+    </AdminPage>,
+  );
+});
+
+adminScreens.get('/forms/:slug', async (c) => {
+  const auth = gate(c);
+  if (auth instanceof Response) return auth;
+  const slug = c.req.param('slug');
+  const includeSpam = c.req.query('spam') === '1';
+
+  const form = await queryOne<{ id: number; slug: string; title: string; status: string }>(
+    `SELECT \`id\`, \`slug\`, \`title\`, \`status\`
+       FROM \`content\` WHERE \`typeSlug\` = 'form' AND \`slug\` = ? LIMIT 1`,
+    [slug],
+  );
+  if (!form) return c.html(<AdminPage title="404" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>Form not found.</AdminPage>, 404);
+
+  const subs = await query<{ id: number; data: unknown; ip: string | null; isSpam: number; createdAt: unknown }>(
+    `SELECT \`id\`, \`data\`, \`ip\`, \`isSpam\`, \`createdAt\`
+       FROM \`formSubmissions\`
+      WHERE \`formId\` = ? ${includeSpam ? '' : 'AND `isSpam` = 0'}
+      ORDER BY \`createdAt\` DESC LIMIT 200`,
+    [form.id],
+  );
+  const totalSpam = (await queryOne<{ n: number }>(
+    'SELECT COUNT(*) AS n FROM `formSubmissions` WHERE `formId` = ? AND `isSpam` = 1',
+    [form.id],
+  ))?.n ?? 0;
+
+  return c.html(
+    <AdminPage title={`Form: ${form.title}`} active="forms" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
+      <div class="top">
+        <h1>{form.title} <span class="muted" style="font-size:14px;font-weight:400">· {subs.length} submission{subs.length === 1 ? '' : 's'}</span></h1>
+        <div style="display:flex;gap:8px">
+          <a class="btn sec" href="/admin/forms">← All forms</a>
+          <a class="btn sec" href={`/admin/content/form/${form.id}`}>Edit definition</a>
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:14px;padding:10px 14px">
+        <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px">
+          <div class="muted">
+            Public endpoint:{' '}
+            <code style="background:var(--panel2);padding:2px 6px;border-radius:4px">POST /api/v1/forms/{form.slug}/submit</code>
+          </div>
+          <div>
+            {includeSpam
+              ? <a class="muted" style="font-size:12px" href={`/admin/forms/${form.slug}`}>← Hide spam</a>
+              : <a class="muted" style="font-size:12px" href={`/admin/forms/${form.slug}?spam=1`}>Show spam ({totalSpam}) →</a>}
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        {subs.length === 0 ? (
+          <div class="muted" style="text-align:center;padding:30px;font-size:13px">
+            No {includeSpam ? '' : 'non-spam '}submissions yet.
+          </div>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th style="width:36%">Data</th>
+                <th>IP</th>
+                <th>Received</th>
+                <th>Status</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {normalizeDates(subs).map((s) => {
+                const data = typeof s.data === 'string' ? (() => { try { return JSON.parse(s.data); } catch { return s.data; } })() : s.data;
+                return (
+                  <tr>
+                    <td>
+                      <pre style="margin:0;font-size:11px;background:var(--panel2);padding:8px;border-radius:4px;max-height:160px;overflow:auto;white-space:pre-wrap">
+                        {typeof data === 'object' ? JSON.stringify(data, null, 2) : String(data ?? '')}
+                      </pre>
+                    </td>
+                    <td class="muted" style="font-size:12px">{s.ip ?? '—'}</td>
+                    <td class="muted" style="font-size:12px">{String(s.createdAt).slice(0, 16).replace('T', ' ')}</td>
+                    <td>{s.isSpam ? <span class="badge b-arch">spam</span> : <span class="badge b-pub">new</span>}</td>
+                    <td>
+                      <form method="post" action={`/admin/forms/${form.slug}/submissions/${s.id}`} style="display:inline;margin:0">
+                        {!s.isSpam ? <button class="btn sm sec" name="action" value="mark-spam" style="margin-right:4px">Mark spam</button> : null}
+                        <button class="btn sm sec" name="action" value="delete" style="color:var(--err)"
+                          onclick="return confirm('Delete this submission?');">Delete</button>
+                      </form>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </AdminPage>,
+  );
+});
+
+adminScreens.post('/forms/:slug/submissions/:id{[0-9]+}', async (c) => {
+  const auth = gate(c);
+  if (auth instanceof Response) return auth;
+  if (!need(c, auth, 'manageForms')) return c.redirect(`/admin/forms/${c.req.param('slug')}`, 302);
+  const slug = c.req.param('slug');
+  const id = Number(c.req.param('id'));
+  const body = await c.req.parseBody();
+  if (body.action === 'mark-spam') {
+    await execute('UPDATE `formSubmissions` SET `isSpam` = 1 WHERE `id` = ?', [id]);
+  } else if (body.action === 'delete') {
+    await execute('DELETE FROM `formSubmissions` WHERE `id` = ?', [id]);
+  }
+  return c.redirect(`/admin/forms/${slug}`, 302);
+});
+
 // ── Users ──────────────────────────────────────────────────────────────
 
 adminScreens.get('/users', async (c) => {
@@ -644,7 +866,7 @@ adminScreens.get('/users', async (c) => {
   const roles = await listRoles();
   const flash = c.req.query('ok');
   return c.html(
-    <AdminPage title="Users" active="users" user={auth.user}>
+    <AdminPage title="Users" active="users" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <div class="top">
         <h1>Users</h1>
       </div>
@@ -765,7 +987,7 @@ adminScreens.get('/redirects', async (c) => {
     'SELECT `id`,`source`,`destination`,`statusCode`,`hitCount` FROM `redirects` ORDER BY `id` DESC',
   );
   return c.html(
-    <AdminPage title="Redirects" active="redirects" user={auth.user}>
+    <AdminPage title="Redirects" active="redirects" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <div class="top">
         <h1>Redirects</h1>
       </div>
@@ -864,7 +1086,7 @@ adminScreens.get('/menus', async (c) => {
   const sel = c.req.query('m') ?? menus[0]?.slug ?? 'main';
   const tree = await getMenuTree(sel, 'en', 'en');
   return c.html(
-    <AdminPage title="Menus" active="menus" user={auth.user}>
+    <AdminPage title="Menus" active="menus" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <div class="top">
         <h1>Menus</h1>
         <div class="row">
@@ -963,7 +1185,7 @@ adminScreens.get('/jobs', async (c) => {
     'SELECT `id`,`kind`,`status`,`attempts`,`lastError`,`createdAt` FROM `jobs` ORDER BY `id` DESC LIMIT 30',
   );
   return c.html(
-    <AdminPage title="Jobs" active="jobs" user={auth.user}>
+    <AdminPage title="Jobs" active="jobs" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <div class="top">
         <h1>Jobs</h1>
         <span class="muted">
@@ -1026,7 +1248,7 @@ adminScreens.get('/webhooks', async (c) => {
   const hooks = await listWebhooks();
   const flash = c.req.query('ok');
   return c.html(
-    <AdminPage title="Webhooks" active="webhooks" user={auth.user}>
+    <AdminPage title="Webhooks" active="webhooks" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <div class="top">
         <h1>Webhooks</h1>
       </div>
