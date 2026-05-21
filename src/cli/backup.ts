@@ -90,15 +90,21 @@ export async function restoreBackup(inPath: string): Promise<{ tables: number; r
   // Discover JSON columns so we re-encode ALL values bound for them —
   // not just objects. The driver returns JSON columns parsed, so a stored
   // `""` comes back as the JS string '' which is NOT valid JSON on insert.
-  const jsonColsRes = await pool.query<{ TABLE_NAME: string; COLUMN_NAME: string }>(
+  const jsonColsRes = await pool.query<{ TABLE_NAME: unknown; COLUMN_NAME: unknown }>(
     `SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS
       WHERE TABLE_SCHEMA = DATABASE() AND DATA_TYPE = 'json'`,
   );
+  // MySQL 8 returns information_schema string columns as VARBINARY in some
+  // configurations; @perryts/mysql surfaces those as Buffer. Coerce both
+  // names to plain strings so the Map lookup later matches.
+  const asStr = (v: unknown): string => (v && typeof v === 'object' && 'toString' in v) ? String(v) : (v == null ? '' : String(v));
   const jsonCols = new Map<string, Set<string>>();
   for (const r of jsonColsRes.rows) {
-    let s = jsonCols.get(r.TABLE_NAME);
-    if (!s) { s = new Set(); jsonCols.set(r.TABLE_NAME, s); }
-    s.add(r.COLUMN_NAME);
+    const table = asStr(r.TABLE_NAME);
+    const col = asStr(r.COLUMN_NAME);
+    let s = jsonCols.get(table);
+    if (!s) { s = new Set(); jsonCols.set(table, s); }
+    s.add(col);
   }
 
   await pool.query('SET FOREIGN_KEY_CHECKS = 0');
