@@ -1,6 +1,6 @@
 {
   "name": "@skelpo/site-kit",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Framework-agnostic SEO + structured-data helpers for Skelpo CMS customer frontends — sitemap, robots, llms.txt, RSS, JSON-LD. Works with Next.js, Hono, Astro, anything.",
   "license": "MIT",
   "author": "Skelpo GmbH <support@skelpo.com>",
