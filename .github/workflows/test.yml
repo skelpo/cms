@@ -38,10 +38,12 @@ jobs:
           cache: npm
 
       - name: Install (root + workspaces)
-        run: |
-          npm ci
-          (cd packages/cms-client && npm ci)
-          (cd packages/site-kit && npm ci)
+        # Single npm ci installs root deps and every workspace's deps in
+        # one resolved tree. Running `(cd packages/X && npm ci)` after a
+        # root install prunes the root node_modules down to that
+        # workspace's deps — hono / fastify / bcryptjs disappear and
+        # typecheck breaks.
+        run: npm ci --include-workspace-root --workspaces
 
       - name: Typecheck (all packages)
         run: |
