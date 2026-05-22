@@ -428,21 +428,24 @@ export async function cmdUsers(argv: string[]): Promise<number> {
     case 'create': {
       const email = positional[0] ?? flags.email;
       const displayName = positional[1] ?? flags.name ?? email;
-      if (!email) return err('Usage: users create <email> <displayName> [--role=admin] [--password=...]');
+      if (!email) return err('Usage: users create <email> <displayName> [--role=admin] [--password=...] [--locale=en]');
       const password = flags.password ?? await prompt('Password: ', true);
+      const body: Record<string, unknown> = { email, displayName, password, roleSlug: flags.role ?? 'editor' };
+      if (flags.locale) body.locale = flags.locale;
       const r = await api('/api/v1/users', {
         method: 'POST',
-        body: { email, displayName, password, roleSlug: flags.role ?? 'editor' },
+        body,
       }) as { data: unknown };
       out(r.data);
       return 0;
     }
     case 'update': {
       const id = positional[0];
-      if (!id) return err('Usage: users update <id> [--name=...] [--role=...]');
+      if (!id) return err('Usage: users update <id> [--name=...] [--role=...] [--locale=en]');
       const patch: Record<string, unknown> = {};
       if (flags.name) patch.displayName = flags.name;
       if (flags.role) patch.roleSlug = flags.role;
+      if (flags.locale) patch.locale = flags.locale;
       const r = await api(`/api/v1/users/${id}`, { method: 'PATCH', body: patch }) as { data: unknown };
       out(r.data);
       return 0;
@@ -462,7 +465,7 @@ export async function cmdUsers(argv: string[]): Promise<number> {
       return 0;
     }
   }
-  return err('Usage: users <list|create|update|suspend|unsuspend>');
+  return err('Usage: users <list|create|update|suspend|unsuspend> [--locale=en]');
 }
 
 export async function cmdRoles(argv: string[]): Promise<number> {
