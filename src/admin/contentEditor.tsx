@@ -10,6 +10,8 @@ import type { FC } from 'hono/jsx';
 import type { FieldDef, ContentTypeRow } from '../content/types.js';
 import type { ContentDbRow } from '../content/content.js';
 import { AdminPage, StatusBadge } from './layout.js';
+import { makeT, type Translator } from './i18n/index.js';
+import { defaultAdminLocale } from './i18n/locales.js';
 
 function val(fields: Record<string, unknown>, name: string): string {
   const v = fields[name];
@@ -29,12 +31,12 @@ function galleryStr(v: unknown): string {
 // JS-light: a hidden <template> holds the empty row markup, the "+ Add"
 // button clones it, and each row has a delete button.
 
-const RepeaterField: FC<{ def: FieldDef; value: string }> = ({ def, value }) => {
+const RepeaterField: FC<{ def: FieldDef; value: string; t: Translator }> = ({ def, value, t }) => {
   const label = (
     <label>
       {def.label ?? def.name}
       {def.required ? <span style="color:var(--err)"> *</span> : null}
-      {def.translatable ? <span class="muted" style="font-weight:400"> · i18n</span> : null}
+      {def.translatable ? <span class="muted" style="font-weight:400"> · {t('editor.i18nTag')}</span> : null}
     </label>
   );
   let items: Record<string, unknown>[] = [];
@@ -55,7 +57,7 @@ const RepeaterField: FC<{ def: FieldDef; value: string }> = ({ def, value }) => 
       >
         <div class="skelpo-rep-items">
           {items.map((item, i) => (
-            <RepeaterItemCard subFields={subFields} item={item} index={i} repeaterName={def.name} />
+            <RepeaterItemCard subFields={subFields} item={item} index={i} repeaterName={def.name} t={t} />
           ))}
         </div>
         {/* The hidden value: JSON-encoded array. JS rewrites it on every edit. */}
@@ -65,18 +67,18 @@ const RepeaterField: FC<{ def: FieldDef; value: string }> = ({ def, value }) => 
           class="btn sm sec"
           style="margin-top:8px"
           onclick={`skelpoRepeaterAdd(this.closest('.skelpo-repeater'))`}
-        >+ Add {def.label?.toLowerCase().replace(/s$/, '') ?? 'item'}</button>
+        >{t('editor.addItem', { item: def.label?.toLowerCase().replace(/s$/, '') ?? t('editor.item') })}</button>
       </div>
     </div>
   );
 };
 
-const RepeaterItemCard: FC<{ subFields: FieldDef[]; item: Record<string, unknown>; index: number; repeaterName: string }> = ({ subFields, item, index, repeaterName }) => (
+const RepeaterItemCard: FC<{ subFields: FieldDef[]; item: Record<string, unknown>; index: number; repeaterName: string; t: Translator }> = ({ subFields, item, index, repeaterName, t }) => (
   <div class="skelpo-rep-item" data-index={index} style="background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:12px;margin-bottom:8px;position:relative">
     <div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center">
       <span>#{index + 1} · {repeaterName}</span>
       <button type="button" class="btn sm sec" style="padding:2px 8px;color:var(--err)"
-        onclick={`skelpoRepeaterRemove(this.closest('.skelpo-rep-item'))`}>× Remove</button>
+        onclick={`skelpoRepeaterRemove(this.closest('.skelpo-rep-item'))`}>{t('editor.removeItem')}</button>
     </div>
     {subFields.map((sf) => {
       const v = item[sf.name];
@@ -134,6 +136,7 @@ const RepeaterItemCard: FC<{ subFields: FieldDef[]; item: Record<string, unknown
 // and a sync-on-submit pass that JSON-encodes repeater state into the
 // hidden field so parseContentForm can JSON.parse it.
 const FORM_INIT_SCRIPT = `
+var I18N=(typeof window!=='undefined'&&window.SKELPO_I18N)||{};
 function skelpoRepeaterSerialize(wrap){
   const items=[];
   wrap.querySelectorAll('.skelpo-rep-item').forEach(card=>{
@@ -212,8 +215,9 @@ function _skelpoUploadFile(file,onUrl,onError){
   fd.append('file',file);
   const isImage=(file.type||'').startsWith('image/');
   if(isImage){
-    const alt=prompt('Alt text for "'+file.name+'":',file.name.replace(/\\.[^.]+$/,'').replace(/[-_]/g,' '))||'';
-    if(!alt){onError('Alt text required');return;}
+    const _p=(I18N.altPrompt||'Alt text for "{file}":').replace('{file}',file.name);
+    const alt=prompt(_p,file.name.replace(/\\.[^.]+$/,'').replace(/[-_]/g,' '))||'';
+    if(!alt){onError(I18N.altRequired||'Alt text required');return;}
     fd.append('altText',JSON.stringify({en:alt}));
   }
   fetch('/admin/media/upload',{method:'POST',body:fd,credentials:'same-origin'})
@@ -236,7 +240,7 @@ document.addEventListener('DOMContentLoaded',function(){
         {name:'image',action:function(editor){
           window.skelpoActiveEasyMDE=editor;
           skelpoOpenMediaPicker('__easymde__');
-        },className:'fa fa-picture-o',title:'Insert image from media library'},
+        },className:'fa fa-picture-o',title:(I18N.insertImageTitle||'Insert image from media library')},
         'code','|','preview','side-by-side','fullscreen','|','guide',
       ],
       uploadImage:true,
@@ -256,11 +260,11 @@ window.skelpoOpenMediaPicker=function(target){
     dlg.id='skelpo-media-picker';
     dlg.className='media-dialog';
     dlg.style.maxWidth='760px';dlg.style.width='90%';
-    dlg.innerHTML='<div class="media-dialog-inner"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><strong style="font-size:14px">Pick an image</strong><form method="dialog" style="margin:0"><button class="btn sm sec" type="submit">Close</button></form></div><div id="skelpo-picker-body" class="muted" style="font-size:13px;padding:30px;text-align:center">Loading…</div></div>';
+    dlg.innerHTML='<div class="media-dialog-inner"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><strong style="font-size:14px">'+(I18N.pickTitle||'Pick an image')+'</strong><form method="dialog" style="margin:0"><button class="btn sm sec" type="submit">'+(I18N.close||'Close')+'</button></form></div><div id="skelpo-picker-body" class="muted" style="font-size:13px;padding:30px;text-align:center">'+(I18N.loading||'Loading…')+'</div></div>';
     document.body.appendChild(dlg);
   }
   dlg.dataset.target=target;
-  document.getElementById('skelpo-picker-body').textContent='Loading…';
+  document.getElementById('skelpo-picker-body').textContent=(I18N.loading||'Loading…');
   dlg.showModal();
   fetch('/admin/media/picker',{credentials:'same-origin'})
     .then(r=>r.text())
@@ -283,7 +287,7 @@ window.skelpoMediaPick=function(id,url,alt,filename){
       const wrap=input.closest('.skelpo-imgfield');
       const previewSlot=wrap.querySelector('.skelpo-imgfield-preview');
       previewSlot.innerHTML='<img src="'+url+'" alt="" style="width:100%;height:100%;object-fit:cover;display:block">';
-      wrap.querySelector('.muted').textContent='Media #'+id;
+      wrap.querySelector('.muted').textContent=(I18N.mediaRef||'Media #{id}').replace('{id}',id);
     }
   }
 };
@@ -292,18 +296,18 @@ window.skelpoClearMediaField=function(name){
   if(!input)return;
   input.value='';
   const wrap=input.closest('.skelpo-imgfield');
-  wrap.querySelector('.skelpo-imgfield-preview').innerHTML='<span class="muted" style="font-size:11px">no image</span>';
-  wrap.querySelector('.muted').textContent='No image selected';
+  wrap.querySelector('.skelpo-imgfield-preview').innerHTML='<span class="muted" style="font-size:11px">'+(I18N.noImage||'no image')+'</span>';
+  wrap.querySelector('.muted').textContent=(I18N.noImageSelected||'No image selected');
 };
 `;
 
-const Field: FC<{ def: FieldDef; value: string }> = ({ def, value }) => {
+const Field: FC<{ def: FieldDef; value: string; t: Translator }> = ({ def, value, t }) => {
   const name = `f_${def.name}`;
   const label = (
     <label>
       {def.label ?? def.name}
       {def.required ? <span style="color:var(--err)"> *</span> : null}
-      {def.translatable ? <span class="muted" style="font-weight:400"> · i18n</span> : null}
+      {def.translatable ? <span class="muted" style="font-weight:400"> · {t('editor.i18nTag')}</span> : null}
     </label>
   );
   switch (def.type) {
@@ -313,7 +317,7 @@ const Field: FC<{ def: FieldDef; value: string }> = ({ def, value }) => {
       return (
         <div>
           {label}
-          <textarea name={name} rows={14} data-easymde="1" placeholder="Write in Markdown — toolbar above provides shortcuts">{value}</textarea>
+          <textarea name={name} rows={14} data-easymde="1" placeholder={t('editor.markdownPlaceholder')}>{value}</textarea>
         </div>
       );
     case 'textarea':
@@ -327,7 +331,7 @@ const Field: FC<{ def: FieldDef; value: string }> = ({ def, value }) => {
       return (
         <div>
           {label}
-          <textarea name={name} rows={6} placeholder="one image URL per line">
+          <textarea name={name} rows={6} placeholder={t('editor.galleryPlaceholder')}>
             {/* `value` arrives JSON-stringified from val(); re-render as URL list. */}
             {(() => { try { const arr = JSON.parse(value); return Array.isArray(arr) ? arr.join('\n') : value; } catch { return value; } })()}
           </textarea>
@@ -342,17 +346,17 @@ const Field: FC<{ def: FieldDef; value: string }> = ({ def, value }) => {
       );
     case 'repeater':
       // Render a friendly per-item card editor (no JSON visible to users).
-      return <RepeaterField def={def} value={value} />;
+      return <RepeaterField def={def} value={value} t={t} />;
     case 'boolean':
       return (
         <div>
           {label}
           <select name={name}>
             <option value="false" selected={value !== 'true'}>
-              No
+              {t('common.no')}
             </option>
             <option value="true" selected={value === 'true'}>
-              Yes
+              {t('common.yes')}
             </option>
           </select>
         </div>
@@ -409,17 +413,17 @@ const Field: FC<{ def: FieldDef; value: string }> = ({ def, value }) => {
               {value ? (
                 <img src={`/api/v1/media/${value}/raw`} alt="" style="width:100%;height:100%;object-fit:cover;display:block" />
               ) : (
-                <span class="muted" style="font-size:11px">no image</span>
+                <span class="muted" style="font-size:11px">{t('editor.noImage')}</span>
               )}
             </div>
             <div style="flex:1;min-width:0">
-              <div class="muted" style="font-size:11px;margin-bottom:8px">{value ? `Media #${value}` : 'No image selected'}</div>
+              <div class="muted" style="font-size:11px;margin-bottom:8px">{value ? t('editor.mediaRef', { id: value }) : t('editor.noImageSelected')}</div>
               <div style="display:flex;gap:6px;flex-wrap:wrap">
                 <button type="button" class="btn sm" onclick={`skelpoOpenMediaPicker('${def.name}')`}>
-                  {value ? 'Change…' : 'Pick image…'}
+                  {value ? t('editor.change') : t('editor.pickImage')}
                 </button>
                 {value ? (
-                  <button type="button" class="btn sm sec" onclick={`skelpoClearMediaField('${def.name}')`}>Clear</button>
+                  <button type="button" class="btn sm sec" onclick={`skelpoClearMediaField('${def.name}')`}>{t('editor.clear')}</button>
                 ) : null}
               </div>
               <input type="hidden" name={name} value={value} data-skelpo-imgfield-input={def.name} />
@@ -435,7 +439,7 @@ const Field: FC<{ def: FieldDef; value: string }> = ({ def, value }) => {
             type="text"
             name={name}
             value={value}
-            placeholder="comma-separated content ids"
+            placeholder={t('editor.relationPlaceholder')}
           />
         </div>
       );
@@ -469,10 +473,13 @@ export const ContentForm: FC<{
   defaultTitle?: string;
   defaultSlug?: string;
   defaultLocale?: string;
+  /** Request translator (falls back to English). */
+  t?: Translator;
 }> = ({
   type, row, fields, seo, user, caps, flash,
-  siblings, availableLocales, translationOf, defaultTitle, defaultSlug, defaultLocale,
+  siblings, availableLocales, translationOf, defaultTitle, defaultSlug, defaultLocale, t,
 }) => {
+  const tr = t ?? makeT(defaultAdminLocale);
   const isNew = !row;
   const action = isNew
     ? `/admin/content/${type.slug}`
@@ -486,24 +493,39 @@ export const ContentForm: FC<{
   // add a new translation.
   const showTabs = !isNew && allLocales.length > 1;
 
+  // Strings the inline form JS needs (alt-text prompts, media picker chrome).
+  const jsI18n = {
+    altPrompt: tr('editor.altPrompt'),
+    altRequired: tr('editor.altRequired'),
+    insertImageTitle: tr('editor.insertImageTitle'),
+    pickTitle: tr('media.pickTitle'),
+    close: tr('media.close'),
+    loading: tr('media.loading'),
+    mediaRef: tr('editor.mediaRef'),
+    noImage: tr('editor.noImage'),
+    noImageSelected: tr('editor.noImageSelected'),
+  };
+
   return (
     <AdminPage
-      title={isNew ? `New ${type.labelSingular}` : row!.title}
+      title={isNew ? tr('editor.newTitle', { label: type.labelSingular }) : row!.title}
       active={type.slug}
+      t={tr}
       user={user}
       caps={caps}
     >
       {/* EasyMDE for richtext fields + repeater add/remove + form serialize. */}
       <link rel="stylesheet" href="/admin/static/easymde/easymde.min.css" />
       <script src="/admin/static/easymde/easymde.min.js"></script>
+      <script dangerouslySetInnerHTML={{ __html: `window.SKELPO_I18N=${JSON.stringify(jsI18n)};` }} />
       <script dangerouslySetInnerHTML={{ __html: FORM_INIT_SCRIPT }} />
       <div class="top">
         <h1>
-          {isNew ? `New ${type.labelSingular}` : `Edit: ${row!.title}`}{' '}
-          {row ? <StatusBadge status={row.status} /> : null}
+          {isNew ? tr('editor.newTitle', { label: type.labelSingular }) : tr('editor.editTitle', { title: row!.title })}{' '}
+          {row ? <StatusBadge status={row.status} t={tr} /> : null}
         </h1>
         <a class="btn sec" href={`/admin/content/${type.slug}`}>
-          ← Back
+          {tr('common.back')}
         </a>
       </div>
       {flash?.ok ? <div class="ok">{flash.ok}</div> : null}
@@ -511,7 +533,7 @@ export const ContentForm: FC<{
       {showTabs ? (
         <div class="card" style="margin-bottom:14px;padding:8px 12px">
           <div style="display:flex;align-items:center;gap:2px;flex-wrap:wrap;font-size:13px">
-            <span class="muted" style="margin-right:8px">Translations:</span>
+            <span class="muted" style="margin-right:8px">{tr('editor.translations')}</span>
             {allLocales.map((l) => {
               const sib = siblingMap.get(l);
               const isActive = l === currentLocale;
@@ -528,7 +550,7 @@ export const ContentForm: FC<{
                   <a
                     href={`/admin/content/${type.slug}/${sib.id}`}
                     style={`${baseStyle}color:#ccc;text-transform:uppercase;font-size:11px;letter-spacing:0.5px`}
-                    title={`${sib.status} (${l})`}
+                    title={tr('editor.translationStatus', { status: sib.status, locale: l })}
                   >
                     {l}
                   </a>
@@ -545,7 +567,7 @@ export const ContentForm: FC<{
                 <a
                   href={newHref}
                   style={`${baseStyle}color:#666;text-transform:uppercase;font-size:11px;letter-spacing:0.5px;border-color:#333;border-style:dashed`}
-                  title={`Add ${l} translation`}
+                  title={tr('editor.addTranslation', { locale: l })}
                 >
                   + {l}
                 </a>
@@ -559,62 +581,62 @@ export const ContentForm: FC<{
         <div class="grid g2" style="align-items:start">
           <div class="card">
             <label>
-              Title<span style="color:var(--err)"> *</span>
+              {tr('editor.title')}<span style="color:var(--err)"> *</span>
             </label>
             <input type="text" name="title" value={row?.title ?? defaultTitle ?? ''} required />
             <label>
-              Slug<span style="color:var(--err)"> *</span>
+              {tr('editor.slug')}<span style="color:var(--err)"> *</span>
             </label>
             <input
               type="text"
               name="slug"
               value={row?.slug ?? defaultSlug ?? ''}
               required
-              placeholder="url-safe-slug"
+              placeholder={tr('editor.slugPlaceholder')}
             />
-            <label>Locale</label>
+            <label>{tr('editor.locale')}</label>
             <input type="text" name="locale" value={row?.locale ?? defaultLocale ?? 'en'} />
             {type.fieldsSchema.fields.map((def) => (
-              <Field def={def} value={val(fields, def.name)} />
+              <Field def={def} value={val(fields, def.name)} t={tr} />
             ))}
           </div>
           <div class="card">
-            <h3 style="margin-top:0">SEO &amp; agent</h3>
-            <label>Meta description (70–160 chars, required to publish)</label>
+            <h3 style="margin-top:0">{tr('editor.seoTitle')}</h3>
+            <label>{tr('editor.metaDescription')}</label>
             <textarea name="seo_metaDescription" rows={3}>
               {String(seo.metaDescription ?? '')}
             </textarea>
-            <label>Meta title (optional override)</label>
+            <label>{tr('editor.metaTitle')}</label>
             <input type="text" name="seo_metaTitle" value={String(seo.metaTitle ?? '')} />
-            <label>OG image (media id)</label>
+            <label>{tr('editor.ogImage')}</label>
             <input type="text" name="seo_ogImage" value={String(seo.ogImage ?? '')} />
-            <label>schema.org type override</label>
+            <label>{tr('editor.schemaType')}</label>
             <input type="text" name="seo_schemaType" value={String(seo.schemaType ?? '')} />
-            <label>noindex</label>
+            <label>{tr('editor.noindex')}</label>
             <select name="seo_noindex">
               <option value="false" selected={seo.noindex !== true}>
-                No
+                {tr('common.no')}
               </option>
               <option value="true" selected={seo.noindex === true}>
-                Yes
+                {tr('common.yes')}
               </option>
             </select>
-            <label>AI summary (for llms.txt)</label>
+            <label>{tr('editor.aiSummary')}</label>
             <textarea name="ai_summary" rows={3}>
               {''}
             </textarea>
             <div style="margin-top:18px;display:flex;gap:8px;flex-wrap:wrap">
               <button class="btn" type="submit" name="action" value="save">
-                Save
+                {tr('editor.save')}
               </button>
               {row && row.status !== 'published' ? (
                 <button class="btn" type="submit" name="action" value="publish">
-                  Save &amp; Publish
+                  {tr('editor.savePublish')}
                 </button>
               ) : null}
               {row && row.status === 'published' ? (
                 <button class="btn sec" type="submit" name="action" value="unpublish">
-                  Unpublish
+                  {tr('editor.unpublish')}
                 </button>
               ) : null}
               {row ? (
@@ -625,7 +647,7 @@ export const ContentForm: FC<{
                   value="delete"
                   style="margin-left:auto;color:var(--err)"
                 >
-                  Delete
+                  {tr('editor.delete')}
                 </button>
               ) : null}
             </div>

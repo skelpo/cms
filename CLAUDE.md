@@ -120,6 +120,14 @@ and is more lenient, so **a clean pass locally does not prove Node 22**.
   bodies stored as markdown text, rendered via `renderMarkdown`.
 - Maintenance/preview mode: admin toggle → frontend serves a branded
   "we'll be right back" 503; `?preview=<token>` cookie bypasses it.
+- **Admin is multilingual** (13 locales, mirrors perry/landing). UI strings
+  live in bundled per-locale TS bags under `src/admin/i18n/messages/`
+  (`en.ts` is source of truth, en is the runtime fallback); never hardcode
+  user-facing chrome — use `t('key')`/`t.plural(...)` from `getT(c)`.
+  Per-request locale = `users.locale` → `skelpoAdminLang` cookie →
+  Accept-Language (`src/admin/i18n/middleware.ts`, mounted on `adminRoutes`).
+  Users set their own language at `/admin/profile` + the sidebar switcher.
+  Adding a locale = extend `i18n/locales.ts` + add a `messages/<loc>.ts`.
 
 ## Permissions
 

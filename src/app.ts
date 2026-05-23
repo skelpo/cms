@@ -27,6 +27,8 @@ app.use('*', async (c, next) => {
 
 // Resolve auth (cookie or bearer) for every request. Routes opt-in to
 // requiring auth via requireAuth(c); the middleware itself doesn't reject.
+// The admin UI language is resolved per-request inside adminRoutes (see
+// src/admin/routes.tsx) so it covers every admin path including /admin.
 app.use('*', attachAuthContext);
 
 // Health endpoints (top-level, no /api prefix).

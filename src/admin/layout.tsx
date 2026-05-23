@@ -9,6 +9,8 @@ import type { FC, PropsWithChildren } from 'hono/jsx';
 import { listTypes } from '../content/types.js';
 import type { RoleCapabilities } from '../auth/users.js';
 import { can, type Action } from '../permissions/check.js';
+import { makeT, type Translator } from './i18n/index.js';
+import { adminLocales, adminLocaleNames, defaultAdminLocale } from './i18n/locales.js';
 
 // Caps-aware sidebar items. Each entry knows what permission it needs;
 // the renderer drops items the current user can't action on.
@@ -85,11 +87,15 @@ export const AdminPage: FC<
     user?: { displayName: string; roleSlug?: string } | null;
     /** Role capabilities — drives sidebar gating. Falls back to no-access. */
     caps?: RoleCapabilities;
+    /** Request translator. Falls back to English when omitted (e.g. stubs). */
+    t?: Translator;
   }>
-> = async ({ title, active, user, caps, children }) => {
+> = async ({ title, active, user, caps, t, children }) => {
   // Treat missing caps as "no access" so the sidebar stays empty rather
   // than leaking everything. Authed pages should always pass caps.
   const c = caps ?? { global: [], types: {} };
+  // Translator: always have one so chrome renders even on stub pages.
+  const tr = t ?? makeT(defaultAdminLocale);
   const allTypes = user ? await listTypes().catch(() => []) : [];
   const customTypes = visibleTypes(c, allTypes);
   // Built-in editorial types only show if the user can read them.
@@ -116,7 +122,7 @@ export const AdminPage: FC<
   const hasDeveloperArea = canManageTypes || canManageForms || canManageRedirects ||
     canManageSettings || canManageUsers || canManageJobs || canManageWebhooks;
   return (
-  <html lang="en">
+  <html lang={tr.locale}>
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -145,29 +151,29 @@ export const AdminPage: FC<
               Skelpo<b>CMS</b>
             </div>
             <nav class="nav">
-              <a href="/admin" class={active === 'dashboard' ? 'on' : ''}>Dashboard</a>
+              <a href="/admin" class={active === 'dashboard' ? 'on' : ''}>{tr('nav.dashboard')}</a>
 
               {/* ── Editorial ─────────────────────────────────── */}
-              <div class="sec">Editorial</div>
-              {showPages ? <a href="/admin/content/page" class={active === 'page' ? 'on' : ''}>Pages</a> : null}
-              {showPosts ? <a href="/admin/content/post" class={active === 'post' ? 'on' : ''}>Posts</a> : null}
-              {showDocs  ? <a href="/admin/content/doc"  class={active === 'doc'  ? 'on' : ''}>Docs</a>  : null}
-              {customTypes.map((t) => (
-                <a href={`/admin/content/${t.slug}`} class={active === t.slug ? 'on' : ''}>{t.label}</a>
+              <div class="sec">{tr('nav.editorial')}</div>
+              {showPages ? <a href="/admin/content/page" class={active === 'page' ? 'on' : ''}>{tr('nav.pages')}</a> : null}
+              {showPosts ? <a href="/admin/content/post" class={active === 'post' ? 'on' : ''}>{tr('nav.posts')}</a> : null}
+              {showDocs  ? <a href="/admin/content/doc"  class={active === 'doc'  ? 'on' : ''}>{tr('nav.docs')}</a>  : null}
+              {customTypes.map((ct) => (
+                <a href={`/admin/content/${ct.slug}`} class={active === ct.slug ? 'on' : ''}>{ct.label}</a>
               ))}
-              {canViewMedia ? <a href="/admin/media" class={active === 'media' ? 'on' : ''}>Media</a> : null}
-              {canManageMenus ? <a href="/admin/menus" class={active === 'menus' ? 'on' : ''}>Menus</a> : null}
-              {canViewSubmissions ? <a href="/admin/forms" class={active === 'forms' ? 'on' : ''}>Form submissions</a> : null}
+              {canViewMedia ? <a href="/admin/media" class={active === 'media' ? 'on' : ''}>{tr('nav.media')}</a> : null}
+              {canManageMenus ? <a href="/admin/menus" class={active === 'menus' ? 'on' : ''}>{tr('nav.menus')}</a> : null}
+              {canViewSubmissions ? <a href="/admin/forms" class={active === 'forms' ? 'on' : ''}>{tr('nav.formSubmissions')}</a> : null}
 
               {/* ── Developer / admin ─────────────────────────── */}
-              {hasDeveloperArea ? <div class="sec">Developer</div> : null}
-              {canManageTypes     ? <a href="/admin/types"     class={active === 'types'     ? 'on' : ''}>Content Types</a> : null}
-              {canManageForms     ? <a href="/admin/forms"     class={active === 'forms-admin' ? 'on' : ''}>Forms (admin)</a> : null}
-              {canManageRedirects ? <a href="/admin/redirects" class={active === 'redirects' ? 'on' : ''}>Redirects</a> : null}
-              {canManageWebhooks  ? <a href="/admin/webhooks"  class={active === 'webhooks'  ? 'on' : ''}>Webhooks</a> : null}
-              {canManageJobs      ? <a href="/admin/jobs"      class={active === 'jobs'      ? 'on' : ''}>Jobs</a> : null}
-              {canManageSettings  ? <a href="/admin/settings"  class={active === 'settings'  ? 'on' : ''}>Settings</a> : null}
-              {canManageUsers     ? <a href="/admin/users"     class={active === 'users'     ? 'on' : ''}>Users</a> : null}
+              {hasDeveloperArea ? <div class="sec">{tr('nav.developer')}</div> : null}
+              {canManageTypes     ? <a href="/admin/types"     class={active === 'types'     ? 'on' : ''}>{tr('nav.contentTypes')}</a> : null}
+              {canManageForms     ? <a href="/admin/forms"     class={active === 'forms-admin' ? 'on' : ''}>{tr('nav.formsAdmin')}</a> : null}
+              {canManageRedirects ? <a href="/admin/redirects" class={active === 'redirects' ? 'on' : ''}>{tr('nav.redirects')}</a> : null}
+              {canManageWebhooks  ? <a href="/admin/webhooks"  class={active === 'webhooks'  ? 'on' : ''}>{tr('nav.webhooks')}</a> : null}
+              {canManageJobs      ? <a href="/admin/jobs"      class={active === 'jobs'      ? 'on' : ''}>{tr('nav.jobs')}</a> : null}
+              {canManageSettings  ? <a href="/admin/settings"  class={active === 'settings'  ? 'on' : ''}>{tr('nav.settings')}</a> : null}
+              {canManageUsers     ? <a href="/admin/users"     class={active === 'users'     ? 'on' : ''}>{tr('nav.users')}</a> : null}
             </nav>
             <div style="margin-top:auto;padding:14px 10px 0;border-top:1px solid var(--line)">
               <div class="muted" style="font-size:12px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
@@ -178,14 +184,31 @@ export const AdminPage: FC<
                   </span>
                 ) : null}
               </div>
-              <div style="display:flex;align-items:center;gap:10px;margin-top:6px">
+              {/* Language switcher — saves to the user's locale + cookie and
+                  reloads the current page in the chosen language. */}
+              <form method="post" action="/admin/profile/language" style="margin:8px 0 0">
+                <input type="hidden" name="return" id="skelpo-lang-return" />
+                <label for="skelpo-lang-select" style="margin:0 0 4px;font-size:11px">{tr('nav.language')}</label>
+                <select
+                  id="skelpo-lang-select"
+                  name="locale"
+                  style="font-size:12px;padding:5px 8px"
+                  onchange="document.getElementById('skelpo-lang-return').value=location.pathname+location.search;this.form.submit()"
+                >
+                  {adminLocales.map((l) => (
+                    <option value={l} selected={l === tr.locale}>{adminLocaleNames[l]}</option>
+                  ))}
+                </select>
+              </form>
+              <div style="display:flex;align-items:center;gap:10px;margin-top:8px">
+                <a href="/admin/profile" style="font-size:12px">{tr('nav.profile')}</a>
                 <a href="/admin/logout" style="font-size:12px">
-                  Sign out
+                  {tr('nav.signOut')}
                 </a>
                 <button
                   type="button"
                   id="skelpo-theme-toggle"
-                  title="Toggle light / dark"
+                  title={tr('nav.themeToggle')}
                   style="margin-left:auto;background:transparent;border:1px solid var(--line);color:var(--mut);border-radius:6px;padding:4px 8px;cursor:pointer;font-size:12px;line-height:1"
                   onclick="(()=>{var d=document.documentElement;var next=d.getAttribute('data-theme')==='light'?'dark':'light';if(next==='light')d.setAttribute('data-theme','light');else d.removeAttribute('data-theme');try{localStorage.setItem('skelpo-theme',next)}catch(e){}document.getElementById('skelpo-theme-icon').textContent=next==='light'?'☾':'☀';})()"
                 >
@@ -204,12 +227,16 @@ export const AdminPage: FC<
   );
 };
 
-export const StatusBadge: FC<{ status: string }> = ({ status }) => {
+export const StatusBadge: FC<{ status: string; t?: Translator }> = ({ status, t }) => {
   const map: Record<string, string> = {
     published: 'b-pub',
     draft: 'b-draft',
     review: 'b-rev',
     archived: 'b-arch',
   };
-  return <span class={`badge ${map[status] ?? 'b-draft'}`}>{status}</span>;
+  // Translate known statuses; unknown values render verbatim.
+  const label = t && ['published', 'draft', 'review', 'archived'].includes(status)
+    ? t(`status.${status}`)
+    : status;
+  return <span class={`badge ${map[status] ?? 'b-draft'}`}>{label}</span>;
 };

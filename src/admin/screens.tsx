@@ -8,6 +8,7 @@ import type { FC } from 'hono/jsx';
 import { AdminPage, StatusBadge } from './layout.js';
 import type { AuthContext } from '../auth/middleware.js';
 import { can } from '../permissions/check.js';
+import { getT, type Translator } from './i18n/index.js';
 import { getAllSettings, setSetting, invalidateSettingsCache } from '../settings/store.js';
 import { invalidate } from '../cache/deps.js';
 import { execute, query, queryOne } from '../db/client.js';
@@ -34,21 +35,21 @@ function need(c: Context, auth: AuthContext, cap: Parameters<typeof can>[1]): bo
 
 // ── Settings index: group by prefix (i18n, site, seo, …). No JSON dump. ──
 
-function describeShape(v: unknown): string {
-  if (v === null || v === undefined) return 'empty';
+function describeShape(v: unknown, t: Translator): string {
+  if (v === null || v === undefined) return t('settings.describe.empty');
   if (Array.isArray(v)) {
-    if (v.length === 0) return 'empty list';
-    if (v.every((x) => typeof x === 'string')) return `${v.length} tag${v.length === 1 ? '' : 's'}`;
-    if (v.every((x) => typeof x === 'object' && x !== null && !Array.isArray(x))) return `${v.length} entr${v.length === 1 ? 'y' : 'ies'}`;
-    return `${v.length} item${v.length === 1 ? '' : 's'}`;
+    if (v.length === 0) return t('settings.describe.emptyList');
+    if (v.every((x) => typeof x === 'string')) return t.plural('settings.describe.tags', v.length);
+    if (v.every((x) => typeof x === 'object' && x !== null && !Array.isArray(x))) return t.plural('settings.describe.entries', v.length);
+    return t.plural('settings.describe.items', v.length);
   }
   if (typeof v === 'object') {
     const leaves = countLeaves(v);
-    return `${leaves} field${leaves === 1 ? '' : 's'}`;
+    return t.plural('settings.describe.fields', leaves);
   }
   if (typeof v === 'string') {
     const s = v as string;
-    return s.length === 0 ? 'empty' : s.length <= 40 ? `"${s}"` : `${s.length} chars`;
+    return s.length === 0 ? t('settings.describe.empty') : s.length <= 40 ? `"${s}"` : t('settings.describe.chars', { n: s.length });
   }
   return String(v);
 }
@@ -63,6 +64,7 @@ function countLeaves(o: unknown): number {
 adminScreens.get('/settings', async (c) => {
   const auth = gate(c);
   if (auth instanceof Response) return auth;
+  const t = getT(c);
   const all = await getAllSettings();
   const flash = c.req.query('ok');
 
@@ -75,10 +77,10 @@ adminScreens.get('/settings', async (c) => {
   }
 
   return c.html(
-    <AdminPage title="Settings" active="settings" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
+    <AdminPage title={t('settings.title')} active="settings" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <div class="top">
-        <h1>Settings</h1>
-        <span class="muted">{Object.keys(all).length} settings · {groups.size} groups</span>
+        <h1>{t('settings.title')}</h1>
+        <span class="muted">{t('settings.summary', { settings: t.plural('settings.settingsCount', Object.keys(all).length), groups: t.plural('settings.groupsCount', groups.size) })}</span>
       </div>
       {flash ? <div class="ok">{decodeURIComponent(flash)}</div> : null}
       {[...groups.entries()].map(([group, items]) => (
@@ -91,7 +93,7 @@ adminScreens.get('/settings', async (c) => {
                   <td style="width:40%">
                     <a href={`/admin/settings/${encodeURIComponent(it.key)}`}>{it.key}</a>
                   </td>
-                  <td class="muted">{describeShape(it.value)}</td>
+                  <td class="muted">{describeShape(it.value, t)}</td>
                 </tr>
               ))}
             </tbody>
@@ -150,79 +152,69 @@ function shapeOf(v: unknown): 'string' | 'multiline' | 'number' | 'boolean' | 't
   return 'tree';
 }
 
-const SHAPE_LABEL: Record<string, string> = {
-  string: 'Single line',
-  multiline: 'Multi-line text',
-  number: 'Number',
-  boolean: 'Yes / No',
-  tags: 'List of tags',
-  repeater: 'List of entries',
-  tree: 'Group of fields',
-  empty: 'Empty',
-};
-
 adminScreens.get('/settings/:keyName', async (c) => {
   const auth = gate(c);
   if (auth instanceof Response) return auth;
+  const t = getT(c);
   const keyName = decodeURIComponent(c.req.param('keyName'));
   const all = await getAllSettings();
   if (!(keyName in all)) {
-    return c.html(<AdminPage title="Not found" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>Setting <code>{keyName}</code> not found.</AdminPage>, 404);
+    return c.html(<AdminPage title={t('common.notFound')} t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('settings.notFound', { key: keyName })}</AdminPage>, 404);
   }
   const value = all[keyName];
   const shape = shapeOf(value);
   const flash = c.req.query('ok') ? { ok: decodeURIComponent(c.req.query('ok')!) } : undefined;
 
   return c.html(
-    <AdminPage title={keyName} active="settings" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
+    <AdminPage title={keyName} active="settings" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <div class="top">
         <h1 style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:18px">{keyName}</h1>
-        <a class="btn sec" href="/admin/settings">← All settings</a>
+        <a class="btn sec" href="/admin/settings">{t('settings.allSettings')}</a>
       </div>
-      <div class="muted" style="margin-bottom:14px;font-size:12px">{SHAPE_LABEL[shape]}</div>
+      <div class="muted" style="margin-bottom:14px;font-size:12px">{t(`settings.shape.${shape}`)}</div>
       {flash?.ok ? <div class="ok">{flash.ok}</div> : null}
       <form method="post" action={`/admin/settings/${encodeURIComponent(keyName)}`} class="card">
         <input type="hidden" name="shape" value={shape} />
         {shape === 'string' ? (
-          <div><label>Value</label><input type="text" name="v" value={String(value ?? '')} /></div>
+          <div><label>{t('settings.value')}</label><input type="text" name="v" value={String(value ?? '')} /></div>
         ) : null}
         {shape === 'multiline' ? (
-          <div><label>Value</label><textarea name="v" rows={8}>{String(value ?? '')}</textarea></div>
+          <div><label>{t('settings.value')}</label><textarea name="v" rows={8}>{String(value ?? '')}</textarea></div>
         ) : null}
         {shape === 'number' ? (
-          <div><label>Value</label><input type="number" name="v" value={String(value ?? '')} /></div>
+          <div><label>{t('settings.value')}</label><input type="number" name="v" value={String(value ?? '')} /></div>
         ) : null}
         {shape === 'boolean' ? (
-          <div><label>Value</label>
+          <div><label>{t('settings.value')}</label>
             <select name="v">
-              <option value="false" selected={value !== true}>No</option>
-              <option value="true" selected={value === true}>Yes</option>
+              <option value="false" selected={value !== true}>{t('common.no')}</option>
+              <option value="true" selected={value === true}>{t('common.yes')}</option>
             </select>
           </div>
         ) : null}
         {shape === 'tags' ? (
           <div>
-            <label>Items (one per line)</label>
+            <label>{t('settings.itemsOnePerLine')}</label>
             <textarea name="v" rows={Math.min(20, Math.max(3, (value as string[]).length + 1))}>
               {(value as string[]).join('\n')}
             </textarea>
-            <div class="muted" style="font-size:12px;margin-top:6px">{(value as string[]).length} item{(value as string[]).length === 1 ? '' : 's'}</div>
+            <div class="muted" style="font-size:12px;margin-top:6px">{t.plural('common.items', (value as string[]).length)}</div>
           </div>
         ) : null}
-        {shape === 'repeater' ? <RepeaterEditor value={value as Record<string, unknown>[]} /> : null}
-        {shape === 'tree' ? <TreeEditor value={value as Record<string, unknown>} /> : null}
-        {shape === 'empty' ? <div class="muted">Empty. <a href={`/admin/settings/${encodeURIComponent(keyName)}/delete`}>Delete setting</a></div> : null}
+        {shape === 'repeater' ? <RepeaterEditor value={value as Record<string, unknown>[]} t={t} /> : null}
+        {shape === 'tree' ? <TreeEditor value={value as Record<string, unknown>} t={t} /> : null}
+        {shape === 'empty' ? <div class="muted">{t('settings.emptyDelete')} <a href={`/admin/settings/${encodeURIComponent(keyName)}/delete`}>{t('settings.deleteSetting')}</a></div> : null}
         <div style="margin-top:18px;display:flex;gap:8px">
-          <button class="btn" type="submit">Save</button>
-          <a class="btn sec" href="/admin/settings">Cancel</a>
+          <button class="btn" type="submit">{t('settings.save')}</button>
+          <a class="btn sec" href="/admin/settings">{t('settings.cancel')}</a>
         </div>
       </form>
     </AdminPage>,
   );
 });
 
-const RepeaterEditor: FC<{ value: Record<string, unknown>[] }> = ({ value }) => {
-  if (value.length === 0) return <div class="muted">No entries yet.</div>;
+const RepeaterEditor: FC<{ value: Record<string, unknown>[]; t: Translator }> = ({ value, t }) => {
+  if (value.length === 0) return <div class="muted">{t('settings.noEntries')}</div>;
   const fieldNames = Array.from(new Set(value.flatMap((row) => Object.keys(row))));
   return (
     <>
@@ -247,12 +239,12 @@ const RepeaterEditor: FC<{ value: Record<string, unknown>[] }> = ({ value }) => 
           })}
         </div>
       ))}
-      <div class="muted" style="font-size:12px;margin-top:4px">Editing existing entries only. Add/remove entries is a follow-up.</div>
+      <div class="muted" style="font-size:12px;margin-top:4px">{t('settings.editExistingOnly')}</div>
     </>
   );
 };
 
-const TreeEditor: FC<{ value: Record<string, unknown> }> = ({ value }) => {
+const TreeEditor: FC<{ value: Record<string, unknown>; t: Translator }> = ({ value, t }) => {
   const leaves = flattenLeaves(value);
   // Group by top-level segment so big i18n bundles render as collapsed cards.
   const groups = new Map<string, FlatLeaf[]>();
@@ -267,7 +259,7 @@ const TreeEditor: FC<{ value: Record<string, unknown> }> = ({ value }) => {
       {[...groups.entries()].map(([groupName, items]) => (
         <details style="background:var(--panel2);border:1px solid var(--line);border-radius:7px;padding:12px 14px;margin-bottom:8px" open={leaves.length < 50}>
           <summary style="cursor:pointer;font-weight:600;color:var(--acc2)">
-            {groupName} <span class="muted" style="font-weight:400;font-size:12px">({items.length} field{items.length === 1 ? '' : 's'})</span>
+            {groupName} <span class="muted" style="font-weight:400;font-size:12px">({t.plural('common.fields', items.length)})</span>
           </summary>
           <div style="margin-top:12px">
             {items.map((leaf) => (
@@ -290,8 +282,9 @@ const TreeEditor: FC<{ value: Record<string, unknown> }> = ({ value }) => {
 adminScreens.post('/settings/:keyName', async (c) => {
   const auth = gate(c);
   if (auth instanceof Response) return auth;
+  const t = getT(c);
   if (!need(c, auth, 'manageSettings')) {
-    return c.redirect('/admin/settings?ok=' + encodeURIComponent('Forbidden'), 302);
+    return c.redirect('/admin/settings?ok=' + encodeURIComponent(t('common.forbidden')), 302);
   }
   const keyName = decodeURIComponent(c.req.param('keyName'));
   const body = await c.req.parseBody();
@@ -356,7 +349,7 @@ adminScreens.post('/settings/:keyName', async (c) => {
   invalidate([`setting:${keyName}`]);
   invalidateSettingsCache();
   invalidate(['GET:/settings'], { prefix: true });
-  return c.redirect(`/admin/settings/${encodeURIComponent(keyName)}?ok=${encodeURIComponent('Saved')}`, 302);
+  return c.redirect(`/admin/settings/${encodeURIComponent(keyName)}?ok=${encodeURIComponent(t('content.flashSaved'))}`, 302);
 });
 
 // ── Media library ──────────────────────────────────────────────────────
@@ -397,29 +390,39 @@ const MEDIA_CSS = `
 adminScreens.get('/media', async (c) => {
   const auth = gate(c);
   if (auth instanceof Response) return auth;
+  const t = getT(c);
   const filter = c.req.query('type') ?? '';
   const items = await listMedia({ ...(filter ? { mimeType: filter } : {}), limit: 200 });
+  // Raw templates (placeholders intact) for the client-side upload script.
+  const mediaI18n = {
+    uploading: t('media.uploading'),
+    altPrompt: t('editor.altPromptA11y'),
+    skipped: t('media.skippedNoAlt'),
+    failed: t('media.uploadFailed'),
+    uploadedOne: t.plural('media.uploaded', 1, { n: '{n}' }),
+    uploadedOther: t.plural('media.uploaded', 2, { n: '{n}' }),
+  };
 
   return c.html(
-    <AdminPage title="Media" active="media" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
+    <AdminPage title={t('media.title')} active="media" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <style dangerouslySetInnerHTML={{ __html: MEDIA_CSS }} />
       <div class="top">
-        <h1>Media</h1>
+        <h1>{t('media.title')}</h1>
         <form method="get" style="display:flex;gap:8px;margin:0">
           <select name="type" onchange="this.form.submit()" style="background:var(--panel2);border:1px solid var(--line);color:var(--ink);padding:6px 10px;border-radius:6px;font-size:13px">
-            <option value="" selected={filter === ''}>All types</option>
-            <option value="image/" selected={filter === 'image/'}>Images</option>
-            <option value="video/" selected={filter === 'video/'}>Videos</option>
-            <option value="audio/" selected={filter === 'audio/'}>Audio</option>
-            <option value="application/pdf" selected={filter === 'application/pdf'}>PDFs</option>
+            <option value="" selected={filter === ''}>{t('media.allTypes')}</option>
+            <option value="image/" selected={filter === 'image/'}>{t('media.images')}</option>
+            <option value="video/" selected={filter === 'video/'}>{t('media.videos')}</option>
+            <option value="audio/" selected={filter === 'audio/'}>{t('media.audio')}</option>
+            <option value="application/pdf" selected={filter === 'application/pdf'}>{t('media.pdfs')}</option>
           </select>
         </form>
       </div>
 
       <div class="card" style="margin-bottom:14px;padding:14px">
         <div id="dropzone" class="dropzone">
-          <div><strong>Drag &amp; drop</strong> images or files here</div>
-          <div class="small">or <label for="dz-file">choose files</label> · max 25 MB each · alt text required for images</div>
+          <div><strong>{t('media.dropStrong')}</strong> {t('media.dropPrompt')}</div>
+          <div class="small">{t('media.or')} <label for="dz-file">{t('media.chooseFiles')}</label> · {t('media.dropHint')}</div>
           <input id="dz-file" type="file" multiple accept="image/*,application/pdf,video/*" />
           <div id="dz-progress" class="media-progress" style="display:none"><div></div></div>
           <div id="dz-status" class="small" style="margin-top:6px"></div>
@@ -427,11 +430,11 @@ adminScreens.get('/media', async (c) => {
       </div>
 
       <div class="card">
-        <div class="muted" style="font-size:12px">{items.length} item{items.length === 1 ? '' : 's'}</div>
+        <div class="muted" style="font-size:12px">{t.plural('common.items', items.length)}</div>
         <div id="media-grid" class="media-grid">
           {items.length === 0 ? (
             <div class="muted" style="grid-column:1/-1;text-align:center;padding:30px;font-size:13px">
-              Nothing here yet — upload your first file above.
+              {t('media.empty')}
             </div>
           ) : items.map((m) => (
             <a class="media-card" href={`/admin/media/${m.id}`} title={m.filename}>
@@ -449,8 +452,10 @@ adminScreens.get('/media', async (c) => {
         </div>
       </div>
 
+      <script dangerouslySetInnerHTML={{ __html: `window.SKELPO_I18N=${JSON.stringify(mediaI18n)};` }} />
       <script dangerouslySetInnerHTML={{ __html: `
         (function(){
+          var I18N=window.SKELPO_I18N||{};
           const dz=document.getElementById('dropzone');
           const input=document.getElementById('dz-file');
           const progress=document.getElementById('dz-progress');
@@ -466,13 +471,13 @@ adminScreens.get('/media', async (c) => {
             progress.style.display='block';bar.style.width='0%';
             let done=0;
             for(const f of files){
-              status.textContent='Uploading '+f.name+' ('+(done+1)+'/'+files.length+')…';
+              status.textContent=(I18N.uploading||'Uploading {file} ({done}/{total})…').replace('{file}',f.name).replace('{done}',done+1).replace('{total}',files.length);
               try{
                 const isImage=f.type.startsWith('image/');
                 let alt='';
                 if(isImage){
-                  alt=prompt('Alt text for "'+f.name+'" (required for accessibility):',f.name.replace(/\\.[^.]+$/,'').replace(/[-_]/g,' '))||'';
-                  if(!alt){status.textContent='Skipped (no alt text): '+f.name;continue;}
+                  alt=prompt((I18N.altPrompt||'Alt text for "{file}" (required for accessibility):').replace('{file}',f.name),f.name.replace(/\\.[^.]+$/,'').replace(/[-_]/g,' '))||'';
+                  if(!alt){status.textContent=(I18N.skipped||'Skipped (no alt text): {file}').replace('{file}',f.name);continue;}
                 }
                 const fd=new FormData();
                 fd.append('file',f);
@@ -480,12 +485,12 @@ adminScreens.get('/media', async (c) => {
                 const r=await fetch('/admin/media/upload',{method:'POST',body:fd,credentials:'same-origin'});
                 if(!r.ok)throw new Error('HTTP '+r.status);
               }catch(e){
-                status.textContent='Failed: '+f.name+' ('+e.message+')';
+                status.textContent=(I18N.failed||'Failed: {file} ({error})').replace('{file}',f.name).replace('{error}',e.message);
                 return;
               }
               done++;bar.style.width=(done/files.length*100)+'%';
             }
-            status.textContent='Uploaded '+done+' file'+(done===1?'':'s')+'.';
+            status.textContent=(done===1?(I18N.uploadedOne||'Uploaded {n} file.'):(I18N.uploadedOther||'Uploaded {n} files.')).replace('{n}',done);
             setTimeout(()=>{location.reload();},500);
           }
         })();
@@ -498,16 +503,17 @@ adminScreens.get('/media', async (c) => {
 adminScreens.get('/media/:id{[0-9]+}', async (c) => {
   const auth = gate(c);
   if (auth instanceof Response) return auth;
+  const t = getT(c);
   const m = await getMedia(Number(c.req.param('id')));
-  if (!m) return c.html(<AdminPage title="Not found" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>Media not found.</AdminPage>, 404);
+  if (!m) return c.html(<AdminPage title={t('common.notFound')} t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('media.notFound')}</AdminPage>, 404);
   const altObj = (typeof m.altText === 'object' && m.altText !== null ? m.altText : {}) as Record<string, string>;
 
   return c.html(
-    <AdminPage title={m.filename} active="media" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
+    <AdminPage title={m.filename} active="media" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <style dangerouslySetInnerHTML={{ __html: MEDIA_CSS }} />
       <div class="top">
         <h1 style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:16px">{m.filename}</h1>
-        <a class="btn sec" href="/admin/media">← All media</a>
+        <a class="btn sec" href="/admin/media">{t('media.allMedia')}</a>
       </div>
       <div class="grid g2" style="align-items:start">
         <div class="card">
@@ -521,20 +527,20 @@ adminScreens.get('/media/:id{[0-9]+}', async (c) => {
         </div>
         <div class="card">
           <form method="post" action={`/admin/media/${m.id}`}>
-            <label>Alt text (en) <span class="muted" style="font-weight:400">· a11y/SEO</span></label>
-            <input type="text" name="altText_en" value={altObj.en ?? ''} placeholder="Describe the image for screen readers" />
-            <label>Filename</label>
+            <label>{t('media.altText')} <span class="muted" style="font-weight:400">· {t('media.altTextNote')}</span></label>
+            <input type="text" name="altText_en" value={altObj.en ?? ''} placeholder={t('media.altPlaceholder')} />
+            <label>{t('media.filename')}</label>
             <input type="text" name="filename" value={m.filename} />
             <div class="muted" style="font-size:12px;margin-top:18px;line-height:1.6">
-              <div><strong>Type:</strong> {m.mimeType}</div>
-              <div><strong>Size:</strong> {fmtBytes(m.sizeBytes)}</div>
-              {m.width && m.height ? <div><strong>Dimensions:</strong> {m.width} × {m.height}</div> : null}
-              <div><strong>Public URL:</strong> <code style="font-size:11px;background:var(--panel2);padding:2px 6px;border-radius:4px">/api/v1/media/{m.id}/raw</code></div>
+              <div><strong>{t('media.metaType')}</strong> {m.mimeType}</div>
+              <div><strong>{t('media.metaSize')}</strong> {fmtBytes(m.sizeBytes)}</div>
+              {m.width && m.height ? <div><strong>{t('media.metaDimensions')}</strong> {m.width} × {m.height}</div> : null}
+              <div><strong>{t('media.metaPublicUrl')}</strong> <code style="font-size:11px;background:var(--panel2);padding:2px 6px;border-radius:4px">/api/v1/media/{m.id}/raw</code></div>
             </div>
             <div style="margin-top:18px;display:flex;gap:8px">
-              <button class="btn" type="submit" name="action" value="save">Save</button>
+              <button class="btn" type="submit" name="action" value="save">{t('media.save')}</button>
               <button class="btn sec" type="submit" name="action" value="delete" style="color:var(--err);margin-left:auto"
-                onclick="return confirm('Delete this media item permanently?');">Delete</button>
+                onclick={'return confirm(' + JSON.stringify(t('media.confirmDelete')) + ')'}>{t('media.delete')}</button>
             </div>
           </form>
         </div>
@@ -591,6 +597,7 @@ adminScreens.post('/media/upload', async (c) => {
 adminScreens.get('/media/picker', async (c) => {
   const auth = gate(c);
   if (auth instanceof Response) return auth;
+  const t = getT(c);
   const items = await listMedia({ mimeType: 'image/', limit: 200 });
   // Returns a fragment, not a full page. CSS comes from the parent.
   return c.html(
@@ -598,7 +605,7 @@ adminScreens.get('/media/picker', async (c) => {
       <style dangerouslySetInnerHTML={{ __html: MEDIA_CSS }} />
       {items.length === 0 ? (
         <div class="muted" style="text-align:center;padding:30px;font-size:13px">
-          No images uploaded yet. <a href="/admin/media" target="_blank">Go to the media library →</a>
+          {t('media.pickerEmpty')} <a href="/admin/media" target="_blank">{t('media.pickerGoToLibrary')}</a>
         </div>
       ) : (
         <div class="media-grid">
@@ -638,13 +645,14 @@ adminScreens.get('/media/picker', async (c) => {
 adminScreens.get('/forms', async (c) => {
   const auth = gate(c);
   if (auth instanceof Response) return auth;
+  const t = getT(c);
   const canManageForms = need(c, auth, 'manageForms');
   const canViewSubs    = canManageForms || need(c, auth, 'viewSubmissions');
   if (!canViewSubs) {
     return c.html(
-      <AdminPage title="Forms" active="forms" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
+      <AdminPage title={t('forms.title')} active="forms" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
         <div class="card" style="text-align:center;padding:30px">
-          <p class="muted">You don't have access to forms. Ask an admin for the <code>viewSubmissions</code> or <code>manageForms</code> capability.</p>
+          <p class="muted">{t('forms.noAccess', { cap1: 'viewSubmissions', cap2: 'manageForms' })}</p>
         </div>
       </AdminPage>,
       403,
@@ -675,30 +683,33 @@ adminScreens.get('/forms', async (c) => {
   const cMap = new Map(counts.map((c) => [c.formId, c]));
 
   return c.html(
-    <AdminPage title="Forms" active="forms" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
+    <AdminPage title={t('forms.title')} active="forms" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <div class="top">
-        <h1>Forms</h1>
-        {canManageForms ? <a class="btn" href="/admin/content/form/new">+ New form</a> : null}
+        <h1>{t('forms.title')}</h1>
+        {canManageForms ? <a class="btn" href="/admin/content/form/new">{t('forms.newForm')}</a> : null}
       </div>
       <div class="card">
         {forms.length === 0 ? (
           <div class="muted" style="text-align:center;padding:30px;font-size:13px;line-height:1.6">
             {canManageForms ? (
               <>
-                <div>No forms yet.</div>
+                <div>{t('forms.emptyManage')}</div>
                 <div style="margin-top:10px">
-                  <a class="btn" href="/admin/content/form/new">Create your first form</a>
+                  <a class="btn" href="/admin/content/form/new">{t('forms.createFirst')}</a>
                 </div>
                 <div style="margin-top:14px;font-size:12px;color:var(--mut)">
-                  A form is a content row (slug = its public name). Submit to it at <code style="background:var(--panel2);padding:2px 6px;border-radius:4px">POST /api/v1/forms/&lt;slug&gt;/submit</code>.
-                  <br />Note: a form needs template integration before it appears on the site.
+                  {(() => {
+                    const parts = t('forms.manageHint').split('{endpoint}');
+                    return <>{parts[0]}<code style="background:var(--panel2);padding:2px 6px;border-radius:4px">POST /api/v1/forms/&lt;slug&gt;/submit</code>{parts[1] ?? ''}</>;
+                  })()}
+                  <br />{t('forms.manageHintNote')}
                 </div>
               </>
             ) : (
               <>
-                <div>No forms set up yet.</div>
+                <div>{t('forms.emptyNoManage')}</div>
                 <div style="margin-top:10px;font-size:12px">
-                  Forms are created by your developer. Submissions to existing forms will appear here.
+                  {t('forms.noManageHint')}
                 </div>
               </>
             )}
@@ -707,25 +718,25 @@ adminScreens.get('/forms', async (c) => {
           <table>
             <thead>
               <tr>
-                <th>Title</th>
-                <th>Slug</th>
-                <th>Status</th>
-                <th>Submissions</th>
-                <th>Spam</th>
+                <th>{t('forms.colTitle')}</th>
+                <th>{t('forms.colSlug')}</th>
+                <th>{t('forms.colStatus')}</th>
+                <th>{t('forms.colSubmissions')}</th>
+                <th>{t('forms.colSpam')}</th>
                 <th></th>
               </tr>
             </thead>
             <tbody>
               {forms.map((f) => {
-                const c = cMap.get(f.id);
+                const cnt = cMap.get(f.id);
                 return (
                   <tr>
                     <td><a href={`/admin/forms/${f.slug}`}>{f.title}</a></td>
                     <td class="muted">{f.slug}</td>
-                    <td><StatusBadge status={f.status} /></td>
-                    <td>{c ? c.total : 0}</td>
-                    <td class="muted">{c?.spam ?? 0}</td>
-                    <td>{canManageForms ? <a class="muted" style="font-size:12px" href={`/admin/content/form/${f.id}`}>Edit definition →</a> : null}</td>
+                    <td><StatusBadge status={f.status} t={t} /></td>
+                    <td>{cnt ? cnt.total : 0}</td>
+                    <td class="muted">{cnt?.spam ?? 0}</td>
+                    <td>{canManageForms ? <a class="muted" style="font-size:12px" href={`/admin/content/form/${f.id}`}>{t('forms.editDefinition')}</a> : null}</td>
                   </tr>
                 );
               })}
@@ -734,9 +745,9 @@ adminScreens.get('/forms', async (c) => {
         )}
       </div>
       <div class="muted" style="font-size:12px;margin-top:10px;line-height:1.6">
-        Submissions can be fetched programmatically:
+        {t('forms.fetchHint')}
         {' '}<code style="background:var(--panel2);padding:2px 6px;border-radius:4px">GET /api/v1/forms/&lt;slug&gt;/submissions</code>
-        {' '}(requires <code>manageForms</code> capability).
+        {' '}({t('forms.fetchHintCap', { cap: 'manageForms' })}).
       </div>
     </AdminPage>,
   );
@@ -745,6 +756,7 @@ adminScreens.get('/forms', async (c) => {
 adminScreens.get('/forms/:slug', async (c) => {
   const auth = gate(c);
   if (auth instanceof Response) return auth;
+  const t = getT(c);
   const slug = c.req.param('slug');
   const includeSpam = c.req.query('spam') === '1';
 
@@ -753,7 +765,7 @@ adminScreens.get('/forms/:slug', async (c) => {
        FROM \`content\` WHERE \`typeSlug\` = 'form' AND \`slug\` = ? LIMIT 1`,
     [slug],
   );
-  if (!form) return c.html(<AdminPage title="404" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>Form not found.</AdminPage>, 404);
+  if (!form) return c.html(<AdminPage title="404" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('forms.notFound')}</AdminPage>, 404);
 
   const subs = await query<{ id: number; data: unknown; ip: string | null; isSpam: number; createdAt: unknown }>(
     `SELECT \`id\`, \`data\`, \`ip\`, \`isSpam\`, \`createdAt\`
@@ -768,40 +780,40 @@ adminScreens.get('/forms/:slug', async (c) => {
   ))?.n ?? 0;
 
   return c.html(
-    <AdminPage title={`Form: ${form.title}`} active="forms" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
+    <AdminPage title={t('forms.detailTitle', { title: form.title })} active="forms" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <div class="top">
-        <h1>{form.title} <span class="muted" style="font-size:14px;font-weight:400">· {subs.length} submission{subs.length === 1 ? '' : 's'}</span></h1>
+        <h1>{form.title} <span class="muted" style="font-size:14px;font-weight:400">· {t.plural('forms.submissionsCount', subs.length)}</span></h1>
         <div style="display:flex;gap:8px">
-          <a class="btn sec" href="/admin/forms">← All forms</a>
-          <a class="btn sec" href={`/admin/content/form/${form.id}`}>Edit definition</a>
+          <a class="btn sec" href="/admin/forms">{t('forms.allForms')}</a>
+          <a class="btn sec" href={`/admin/content/form/${form.id}`}>{t('forms.editDefinitionPlain')}</a>
         </div>
       </div>
       <div class="card" style="margin-bottom:14px;padding:10px 14px">
         <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px">
           <div class="muted">
-            Public endpoint:{' '}
+            {t('forms.publicEndpoint')}{' '}
             <code style="background:var(--panel2);padding:2px 6px;border-radius:4px">POST /api/v1/forms/{form.slug}/submit</code>
           </div>
           <div>
             {includeSpam
-              ? <a class="muted" style="font-size:12px" href={`/admin/forms/${form.slug}`}>← Hide spam</a>
-              : <a class="muted" style="font-size:12px" href={`/admin/forms/${form.slug}?spam=1`}>Show spam ({totalSpam}) →</a>}
+              ? <a class="muted" style="font-size:12px" href={`/admin/forms/${form.slug}`}>{t('forms.hideSpam')}</a>
+              : <a class="muted" style="font-size:12px" href={`/admin/forms/${form.slug}?spam=1`}>{t('forms.showSpam', { n: totalSpam })}</a>}
           </div>
         </div>
       </div>
       <div class="card">
         {subs.length === 0 ? (
           <div class="muted" style="text-align:center;padding:30px;font-size:13px">
-            No {includeSpam ? '' : 'non-spam '}submissions yet.
+            {includeSpam ? t('forms.noSubmissions') : t('forms.noNonSpamSubmissions')}
           </div>
         ) : (
           <table>
             <thead>
               <tr>
-                <th style="width:36%">Data</th>
-                <th>IP</th>
-                <th>Received</th>
-                <th>Status</th>
+                <th style="width:36%">{t('forms.colData')}</th>
+                <th>{t('forms.colIp')}</th>
+                <th>{t('forms.colReceived')}</th>
+                <th>{t('forms.colStatus')}</th>
                 <th></th>
               </tr>
             </thead>
@@ -817,12 +829,12 @@ adminScreens.get('/forms/:slug', async (c) => {
                     </td>
                     <td class="muted" style="font-size:12px">{s.ip ?? '—'}</td>
                     <td class="muted" style="font-size:12px">{String(s.createdAt).slice(0, 16).replace('T', ' ')}</td>
-                    <td>{s.isSpam ? <span class="badge b-arch">spam</span> : <span class="badge b-pub">new</span>}</td>
+                    <td>{s.isSpam ? <span class="badge b-arch">{t('forms.badgeSpam')}</span> : <span class="badge b-pub">{t('forms.badgeNew')}</span>}</td>
                     <td>
                       <form method="post" action={`/admin/forms/${form.slug}/submissions/${s.id}`} style="display:inline;margin:0">
-                        {!s.isSpam ? <button class="btn sm sec" name="action" value="mark-spam" style="margin-right:4px">Mark spam</button> : null}
+                        {!s.isSpam ? <button class="btn sm sec" name="action" value="mark-spam" style="margin-right:4px">{t('forms.markSpam')}</button> : null}
                         <button class="btn sm sec" name="action" value="delete" style="color:var(--err)"
-                          onclick="return confirm('Delete this submission?');">Delete</button>
+                          onclick={'return confirm(' + JSON.stringify(t('forms.confirmDeleteSubmission')) + ')'}>{t('common.delete')}</button>
                       </form>
                     </td>
                   </tr>
@@ -856,6 +868,7 @@ adminScreens.post('/forms/:slug/submissions/:id{[0-9]+}', async (c) => {
 adminScreens.get('/users', async (c) => {
   const auth = gate(c);
   if (auth instanceof Response) return auth;
+  const t = getT(c);
   const users = await query<{
     id: number; email: string; displayName: string; status: string; roleSlug: string; lastLoginAt: unknown;
   }>(
@@ -866,19 +879,19 @@ adminScreens.get('/users', async (c) => {
   const roles = await listRoles();
   const flash = c.req.query('ok');
   return c.html(
-    <AdminPage title="Users" active="users" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
+    <AdminPage title={t('users.title')} active="users" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <div class="top">
-        <h1>Users</h1>
+        <h1>{t('users.title')}</h1>
       </div>
       {flash ? <div class="ok">{flash}</div> : null}
       <div class="card">
         <table>
           <thead>
             <tr>
-              <th>Email</th>
-              <th>Name</th>
-              <th>Role</th>
-              <th>Status</th>
+              <th>{t('users.colEmail')}</th>
+              <th>{t('users.colName')}</th>
+              <th>{t('users.colRole')}</th>
+              <th>{t('users.colStatus')}</th>
               <th></th>
             </tr>
           </thead>
@@ -893,11 +906,11 @@ adminScreens.get('/users', async (c) => {
                   {u.id !== auth.user.id ? (
                     <form method="post" action={`/admin/users/${u.id}/toggle`} style="margin:0">
                       <button class="btn sec sm" type="submit">
-                        {u.status === 'suspended' ? 'Unsuspend' : 'Suspend'}
+                        {u.status === 'suspended' ? t('users.unsuspend') : t('users.suspend')}
                       </button>
                     </form>
                   ) : (
-                    <span class="muted">you</span>
+                    <span class="muted">{t('common.you')}</span>
                   )}
                 </td>
               </tr>
@@ -906,19 +919,19 @@ adminScreens.get('/users', async (c) => {
         </table>
       </div>
       <div class="card" style="margin-top:16px">
-        <h3 style="margin-top:0">Invite user</h3>
+        <h3 style="margin-top:0">{t('users.inviteTitle')}</h3>
         <form method="post" action="/admin/users">
           <div class="grid g3">
             <div>
-              <label>Email</label>
+              <label>{t('users.email')}</label>
               <input type="email" name="email" required />
             </div>
             <div>
-              <label>Display name</label>
+              <label>{t('users.displayName')}</label>
               <input type="text" name="displayName" required />
             </div>
             <div>
-              <label>Role</label>
+              <label>{t('users.role')}</label>
               <select name="roleSlug">
                 {roles.map((r) => (
                   <option value={r.slug}>{r.label}</option>
@@ -928,7 +941,7 @@ adminScreens.get('/users', async (c) => {
           </div>
           <div style="margin-top:14px">
             <button class="btn" type="submit">
-              Send invite
+              {t('users.sendInvite')}
             </button>
           </div>
         </form>
@@ -940,14 +953,15 @@ adminScreens.get('/users', async (c) => {
 adminScreens.post('/users', async (c) => {
   const auth = gate(c);
   if (auth instanceof Response) return auth;
-  if (!need(c, auth, 'manageUsers')) return c.redirect('/admin/users?ok=Forbidden', 302);
+  const t = getT(c);
+  if (!need(c, auth, 'manageUsers')) return c.redirect('/admin/users?ok=' + encodeURIComponent(t('users.flashForbidden')), 302);
   const b = await c.req.parseBody();
   const email = String(b.email ?? '').toLowerCase().trim();
   const displayName = String(b.displayName ?? '').trim();
   const role = await findRoleBySlug(String(b.roleSlug ?? 'viewer'));
-  if (!email || !displayName || !role) return c.redirect('/admin/users?ok=Invalid+input', 302);
+  if (!email || !displayName || !role) return c.redirect('/admin/users?ok=' + encodeURIComponent(t('users.flashInvalidInput')), 302);
   const dup = await queryOne<{ id: number }>('SELECT `id` FROM `users` WHERE `email`=?', [email]);
-  if (dup) return c.redirect('/admin/users?ok=Email+already+used', 302);
+  if (dup) return c.redirect('/admin/users?ok=' + encodeURIComponent(t('users.flashEmailUsed')), 302);
   const tok = Array.from(crypto.getRandomValues(new Uint8Array(32)), (x) => x.toString(16).padStart(2, '0')).join('');
   const ph = await hashPassword(tok); // unusable until invite accepted
   await execute(
@@ -961,21 +975,22 @@ adminScreens.post('/users', async (c) => {
     to: email,
     variables: { siteName: 'Skelpo CMS', inviteUrl: `/admin/accept-invite?token=${tok}` },
   });
-  return c.redirect('/admin/users?ok=Invite+sent', 302);
+  return c.redirect('/admin/users?ok=' + encodeURIComponent(t('users.flashInviteSent')), 302);
 });
 
 adminScreens.post('/users/:id/toggle', async (c) => {
   const auth = gate(c);
   if (auth instanceof Response) return auth;
-  if (!need(c, auth, 'manageUsers')) return c.redirect('/admin/users?ok=Forbidden', 302);
+  const t = getT(c);
+  if (!need(c, auth, 'manageUsers')) return c.redirect('/admin/users?ok=' + encodeURIComponent(t('users.flashForbidden')), 302);
   const id = Number(c.req.param('id'));
-  if (id === auth.user.id) return c.redirect('/admin/users?ok=Cannot+change+self', 302);
+  if (id === auth.user.id) return c.redirect('/admin/users?ok=' + encodeURIComponent(t('users.flashCannotChangeSelf')), 302);
   const u = await queryOne<{ status: string }>('SELECT `status` FROM `users` WHERE `id`=?', [id]);
-  if (!u) return c.redirect('/admin/users?ok=Not+found', 302);
+  if (!u) return c.redirect('/admin/users?ok=' + encodeURIComponent(t('users.flashNotFound')), 302);
   const next = u.status === 'suspended' ? 'active' : 'suspended';
   await execute('UPDATE `users` SET `status`=? WHERE `id`=?', [next, id]);
   if (next === 'suspended') await execute('DELETE FROM `sessions` WHERE `userId`=?', [id]);
-  return c.redirect('/admin/users?ok=Updated', 302);
+  return c.redirect('/admin/users?ok=' + encodeURIComponent(t('users.flashUpdated')), 302);
 });
 
 // ── Redirects ──────────────────────────────────────────────────────────
@@ -983,26 +998,27 @@ adminScreens.post('/users/:id/toggle', async (c) => {
 adminScreens.get('/redirects', async (c) => {
   const auth = gate(c);
   if (auth instanceof Response) return auth;
+  const t = getT(c);
   const rows = await query<{ id: number; source: string; destination: string; statusCode: number; hitCount: number }>(
     'SELECT `id`,`source`,`destination`,`statusCode`,`hitCount` FROM `redirects` ORDER BY `id` DESC',
   );
   return c.html(
-    <AdminPage title="Redirects" active="redirects" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
+    <AdminPage title={t('redirects.title')} active="redirects" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <div class="top">
-        <h1>Redirects</h1>
+        <h1>{t('redirects.title')}</h1>
       </div>
       <div class="card">
         <form method="post" action="/admin/redirects" class="row" style="gap:8px;align-items:end;flex-wrap:wrap">
           <div style="flex:1;min-width:160px">
-            <label>Source</label>
-            <input type="text" name="source" placeholder="/old-url" required />
+            <label>{t('redirects.source')}</label>
+            <input type="text" name="source" placeholder={t('redirects.sourcePlaceholder')} required />
           </div>
           <div style="flex:1;min-width:160px">
-            <label>Destination</label>
-            <input type="text" name="destination" placeholder="/new-url" required />
+            <label>{t('redirects.destination')}</label>
+            <input type="text" name="destination" placeholder={t('redirects.destinationPlaceholder')} required />
           </div>
           <div style="width:110px">
-            <label>Code</label>
+            <label>{t('redirects.code')}</label>
             <select name="statusCode">
               <option>301</option>
               <option>302</option>
@@ -1011,7 +1027,7 @@ adminScreens.get('/redirects', async (c) => {
             </select>
           </div>
           <button class="btn" type="submit">
-            Add
+            {t('redirects.add')}
           </button>
         </form>
       </div>
@@ -1019,10 +1035,10 @@ adminScreens.get('/redirects', async (c) => {
         <table>
           <thead>
             <tr>
-              <th>Source</th>
-              <th>→ Destination</th>
-              <th>Code</th>
-              <th>Hits</th>
+              <th>{t('redirects.colSource')}</th>
+              <th>{t('redirects.colDestination')}</th>
+              <th>{t('redirects.colCode')}</th>
+              <th>{t('redirects.colHits')}</th>
               <th></th>
             </tr>
           </thead>
@@ -1036,7 +1052,7 @@ adminScreens.get('/redirects', async (c) => {
                 <td>
                   <form method="post" action={`/admin/redirects/${r.id}/delete`} style="margin:0">
                     <button class="btn sec sm" type="submit">
-                      Delete
+                      {t('common.delete')}
                     </button>
                   </form>
                 </td>
@@ -1082,13 +1098,14 @@ adminScreens.post('/redirects/:id/delete', async (c) => {
 adminScreens.get('/menus', async (c) => {
   const auth = gate(c);
   if (auth instanceof Response) return auth;
+  const t = getT(c);
   const menus = await listMenus();
   const sel = c.req.query('m') ?? menus[0]?.slug ?? 'main';
   const tree = await getMenuTree(sel, 'en', 'en');
   return c.html(
-    <AdminPage title="Menus" active="menus" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
+    <AdminPage title={t('menus.title')} active="menus" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <div class="top">
-        <h1>Menus</h1>
+        <h1>{t('menus.title')}</h1>
         <div class="row">
           {menus.map((m) => (
             <a class={`btn sm ${m.slug === sel ? '' : 'sec'}`} href={`/admin/menus?m=${m.slug}`}>
@@ -1098,13 +1115,13 @@ adminScreens.get('/menus', async (c) => {
         </div>
       </div>
       <div class="card">
-        <h3 style="margin-top:0">{sel} items</h3>
+        <h3 style="margin-top:0">{t('menus.itemsHeading', { slug: sel })}</h3>
         <table>
           <thead>
             <tr>
-              <th>Label (en)</th>
-              <th>URL</th>
-              <th>Order</th>
+              <th>{t('menus.colLabel')}</th>
+              <th>{t('menus.colUrl')}</th>
+              <th>{t('menus.colOrder')}</th>
               <th></th>
             </tr>
           </thead>
@@ -1112,12 +1129,12 @@ adminScreens.get('/menus', async (c) => {
             {(tree?.items ?? []).map((i) => (
               <tr>
                 <td>{i.label}</td>
-                <td class="muted">{i.url ?? '(content link)'}</td>
+                <td class="muted">{i.url ?? t('menus.contentLink')}</td>
                 <td>{i.sortOrder}</td>
                 <td>
                   <form method="post" action={`/admin/menus/${sel}/items/${i.id}/delete`} style="margin:0">
                     <button class="btn sec sm" type="submit">
-                      Delete
+                      {t('common.delete')}
                     </button>
                   </form>
                 </td>
@@ -1127,22 +1144,22 @@ adminScreens.get('/menus', async (c) => {
         </table>
       </div>
       <div class="card" style="margin-top:16px">
-        <h3 style="margin-top:0">Add item to “{sel}”</h3>
+        <h3 style="margin-top:0">{t('menus.addItem', { slug: sel })}</h3>
         <form method="post" action={`/admin/menus/${sel}/items`} class="row" style="gap:8px;align-items:end;flex-wrap:wrap">
           <div style="flex:1;min-width:140px">
-            <label>Label (en)</label>
+            <label>{t('menus.label')}</label>
             <input type="text" name="label" required />
           </div>
           <div style="flex:1;min-width:140px">
-            <label>URL</label>
-            <input type="text" name="url" placeholder="/about" required />
+            <label>{t('menus.url')}</label>
+            <input type="text" name="url" placeholder={t('menus.urlPlaceholder')} required />
           </div>
           <div style="width:90px">
-            <label>Order</label>
+            <label>{t('menus.order')}</label>
             <input type="number" name="sortOrder" value="0" />
           </div>
           <button class="btn" type="submit">
-            Add
+            {t('menus.add')}
           </button>
         </form>
       </div>
@@ -1184,23 +1201,24 @@ adminScreens.get('/jobs', async (c) => {
   const recent = await query<{ id: number; kind: string; status: string; attempts: number; lastError: string | null; createdAt: unknown }>(
     'SELECT `id`,`kind`,`status`,`attempts`,`lastError`,`createdAt` FROM `jobs` ORDER BY `id` DESC LIMIT 30',
   );
+  const t = getT(c);
   return c.html(
-    <AdminPage title="Jobs" active="jobs" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
+    <AdminPage title={t('jobs.title')} active="jobs" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <div class="top">
-        <h1>Jobs</h1>
+        <h1>{t('jobs.title')}</h1>
         <span class="muted">
-          {Object.entries(stats).map(([k, v]) => `${k}: ${v}`).join('  ·  ') || 'idle'}
+          {Object.entries(stats).map(([k, v]) => `${k}: ${v}`).join('  ·  ') || t('common.idle')}
         </span>
       </div>
       <div class="card">
         <table>
           <thead>
             <tr>
-              <th>#</th>
-              <th>Kind</th>
-              <th>Status</th>
-              <th>Attempts</th>
-              <th>Error</th>
+              <th>{t('jobs.colId')}</th>
+              <th>{t('jobs.colKind')}</th>
+              <th>{t('jobs.colStatus')}</th>
+              <th>{t('jobs.colAttempts')}</th>
+              <th>{t('jobs.colError')}</th>
               <th></th>
             </tr>
           </thead>
@@ -1218,7 +1236,7 @@ adminScreens.get('/jobs', async (c) => {
                   {j.status === 'failed' || j.status === 'dead' ? (
                     <form method="post" action={`/admin/jobs/${j.id}/retry`} style="margin:0">
                       <button class="btn sec sm" type="submit">
-                        Retry
+                        {t('jobs.retry')}
                       </button>
                     </form>
                   ) : null}
@@ -1245,21 +1263,22 @@ adminScreens.post('/jobs/:id/retry', async (c) => {
 adminScreens.get('/webhooks', async (c) => {
   const auth = gate(c);
   if (auth instanceof Response) return auth;
+  const t = getT(c);
   const hooks = await listWebhooks();
   const flash = c.req.query('ok');
   return c.html(
-    <AdminPage title="Webhooks" active="webhooks" user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
+    <AdminPage title={t('webhooks.title')} active="webhooks" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <div class="top">
-        <h1>Webhooks</h1>
+        <h1>{t('webhooks.title')}</h1>
       </div>
-      {flash ? <div class="ok">{flash}</div> : null}
+      {flash ? <div class="ok">{decodeURIComponent(flash)}</div> : null}
       <div class="card">
         <table>
           <thead>
             <tr>
-              <th>URL</th>
-              <th>Events</th>
-              <th>Active</th>
+              <th>{t('webhooks.colUrl')}</th>
+              <th>{t('webhooks.colEvents')}</th>
+              <th>{t('webhooks.colActive')}</th>
               <th></th>
             </tr>
           </thead>
@@ -1268,11 +1287,11 @@ adminScreens.get('/webhooks', async (c) => {
               <tr>
                 <td>{h.url}</td>
                 <td class="muted">{h.events.join(', ')}</td>
-                <td>{h.active ? 'yes' : 'no'}</td>
+                <td>{h.active ? t('webhooks.activeYes') : t('webhooks.activeNo')}</td>
                 <td>
                   <form method="post" action={`/admin/webhooks/${h.id}/delete`} style="margin:0">
                     <button class="btn sec sm" type="submit">
-                      Delete
+                      {t('common.delete')}
                     </button>
                   </form>
                 </td>
@@ -1282,11 +1301,11 @@ adminScreens.get('/webhooks', async (c) => {
         </table>
       </div>
       <div class="card" style="margin-top:16px">
-        <h3 style="margin-top:0">Add webhook</h3>
+        <h3 style="margin-top:0">{t('webhooks.addTitle')}</h3>
         <form method="post" action="/admin/webhooks">
-          <label>URL</label>
-          <input type="url" name="url" required placeholder="https://site.com/webhook/cms" />
-          <label>Events (comma-separated, or *)</label>
+          <label>{t('webhooks.url')}</label>
+          <input type="url" name="url" required placeholder={t('webhooks.urlPlaceholder')} />
+          <label>{t('webhooks.events')}</label>
           <input
             type="text"
             name="events"
@@ -1294,7 +1313,7 @@ adminScreens.get('/webhooks', async (c) => {
           />
           <div style="margin-top:14px">
             <button class="btn" type="submit">
-              Add webhook
+              {t('webhooks.add')}
             </button>
           </div>
         </form>
@@ -1306,7 +1325,8 @@ adminScreens.get('/webhooks', async (c) => {
 adminScreens.post('/webhooks', async (c) => {
   const auth = gate(c);
   if (auth instanceof Response) return auth;
-  if (!need(c, auth, 'manageSettings')) return c.redirect('/admin/webhooks?ok=Forbidden', 302);
+  const t = getT(c);
+  if (!need(c, auth, 'manageSettings')) return c.redirect('/admin/webhooks?ok=' + encodeURIComponent(t('webhooks.flashForbidden')), 302);
   const b = await c.req.parseBody();
   const url = String(b.url ?? '').trim();
   const events = String(b.events ?? '')
@@ -1315,15 +1335,16 @@ adminScreens.post('/webhooks', async (c) => {
     .filter(Boolean);
   if (url && events.length) {
     const { secret } = await createWebhook({ url, events });
-    return c.redirect('/admin/webhooks?ok=' + encodeURIComponent(`Created. Secret (save it): ${secret}`), 302);
+    return c.redirect('/admin/webhooks?ok=' + encodeURIComponent(t('webhooks.flashCreated', { secret })), 302);
   }
-  return c.redirect('/admin/webhooks?ok=Invalid+input', 302);
+  return c.redirect('/admin/webhooks?ok=' + encodeURIComponent(t('webhooks.flashInvalidInput')), 302);
 });
 
 adminScreens.post('/webhooks/:id/delete', async (c) => {
   const auth = gate(c);
   if (auth instanceof Response) return auth;
+  const t = getT(c);
   if (!need(c, auth, 'manageSettings')) return c.redirect('/admin/webhooks', 302);
   await deleteWebhook(Number(c.req.param('id')));
-  return c.redirect('/admin/webhooks?ok=Deleted', 302);
+  return c.redirect('/admin/webhooks?ok=' + encodeURIComponent(t('webhooks.flashDeleted')), 302);
 });
