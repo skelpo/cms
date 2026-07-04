@@ -58,6 +58,8 @@ export function testEnv(): NodeJS.ProcessEnv {
     IMGPROXY_SIGN_KEY: '',
     IMGPROXY_SALT: '',
     LOG_LEVEL: 'error',
+    // Tests deliver webhooks to a local sink (127.0.0.1); allow private hosts.
+    WEBHOOK_ALLOW_PRIVATE_HOSTS: 'true',
   };
 }
 

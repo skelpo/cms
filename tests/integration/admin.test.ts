@@ -191,7 +191,9 @@ IT('admin menu-item form → appears in API menu', async () => {
 });
 
 IT('admin settings form → persisted + readable via API', async () => {
-  const r = await form('/admin/settings', { 's_site.name': 'Admin Set Name' });
+  // Settings are edited per-key at /admin/settings/:keyName (shape-aware form),
+  // not a bulk /admin/settings POST.
+  const r = await form('/admin/settings/site.name', { shape: 'string', v: 'Admin Set Name' });
   assert.equal(r.status, 302);
   const s = await (await fetch(`${BASE}/api/v1/settings/site.name`)).json();
   assert.equal(s.data['site.name'], 'Admin Set Name');

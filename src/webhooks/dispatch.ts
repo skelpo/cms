@@ -99,6 +99,11 @@ export function assertSafeWebhookUrl(raw: string): void {
   if (u.protocol !== 'http:' && u.protocol !== 'https:') {
     throw new Error('webhook url must use http or https');
   }
+  // Opt-in escape hatch for deployments (and the test suite) that intentionally
+  // deliver to an internal host. OFF by default — the SSRF guard is the safe
+  // default; only set WEBHOOK_ALLOW_PRIVATE_HOSTS=true if you trust every
+  // configured webhook target.
+  if (process.env.WEBHOOK_ALLOW_PRIVATE_HOSTS === 'true') return;
   if (isBlockedWebhookHost(u.hostname)) {
     throw new Error('webhook url may not target a private, loopback, or link-local host');
   }

@@ -354,7 +354,7 @@ adminScreens.post('/settings/:keyName', async (c) => {
   await setSetting(keyName, newValue, auth.user.id);
   invalidate([`setting:${keyName}`]);
   invalidateSettingsCache();
-  invalidate(['GET:/settings'], { prefix: true });
+  invalidate(['settings:all']);
   return c.redirect(`/admin/settings/${encodeURIComponent(keyName)}?ok=${encodeURIComponent(t('content.flashSaved'))}`, 302);
 });
 
