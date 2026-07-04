@@ -4,10 +4,11 @@ import { Hono } from 'hono';
 import { execute, query, queryOne } from '../../db/client.js';
 import { normalizeDates } from '../../db/datetime.js';
 import { hashPassword } from '../../auth/password.js';
-import { findRoleBySlug, listRoles, type UserRow, type RoleRow } from '../../auth/users.js';
+import { findRoleBySlug, findRoleById, listRoles, type UserRow, type RoleRow } from '../../auth/users.js';
+import { deleteAllSessionsForUser } from '../../auth/sessions.js';
 import { errorResponse } from './_helpers.js';
-import { requireAuth } from '../../auth/middleware.js';
-import { can } from '../../permissions/check.js';
+import { requireAuth, isResponse } from '../../auth/middleware.js';
+import { can, grantsWithinActor, isCapabilitiesShape } from '../../permissions/check.js';
 
 export const userRoutes = new Hono();
 export const roleRoutes = new Hono();
@@ -28,7 +29,7 @@ interface PublicUserRow {
 
 userRoutes.get('/', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageUsers')) {
     return errorResponse(c, 'forbidden', 'manageUsers capability required', 403);
   }
@@ -44,7 +45,7 @@ userRoutes.get('/', async (c) => {
 
 userRoutes.post('/', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageUsers')) {
     return errorResponse(c, 'forbidden', 'manageUsers capability required', 403);
   }
@@ -67,6 +68,14 @@ userRoutes.post('/', async (c) => {
     roleId = r.id;
   }
   if (!roleId) return errorResponse(c, 'validationError', 'roleId or roleSlug required', 422);
+
+  // Prevent privilege escalation: you may only assign a role whose capabilities
+  // you already hold — otherwise `manageUsers` alone could mint an admin.
+  const targetRole = await findRoleById(roleId);
+  if (!targetRole) return errorResponse(c, 'validationError', 'unknown role', 422);
+  if (!grantsWithinActor(auth.role.capabilities, targetRole.capabilities)) {
+    return errorResponse(c, 'forbidden', 'cannot assign a role more privileged than your own', 403);
+  }
 
   const dup = await queryOne<{ id: number }>('SELECT `id` FROM `users` WHERE `email` = ?', [email]);
   if (dup) return errorResponse(c, 'conflict', 'email already in use', 409);
@@ -100,32 +109,52 @@ userRoutes.post('/', async (c) => {
 
 userRoutes.patch('/:id', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   const id = Number(c.req.param('id'));
   const isSelf = auth.user.id === id;
-  if (!isSelf && !can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageUsers')) {
-    return errorResponse(c, 'forbidden', 'manageUsers capability required', 403);
+  if (!isSelf) {
+    if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageUsers')) {
+      return errorResponse(c, 'forbidden', 'manageUsers capability required', 403);
+    }
+    // Don't let a manager act on a user whose role is more privileged than the
+    // actor's own — otherwise `manageUsers` could reset an admin's password
+    // (account takeover) or otherwise tamper with a superior account.
+    const target = await queryOne<{ roleId: number }>('SELECT `roleId` FROM `users` WHERE `id` = ?', [id]);
+    if (!target) return errorResponse(c, 'notFound', 'user not found', 404);
+    const targetRole = await findRoleById(target.roleId);
+    if (targetRole && !grantsWithinActor(auth.role.capabilities, targetRole.capabilities)) {
+      return errorResponse(c, 'forbidden', 'cannot modify a user more privileged than your own role', 403);
+    }
   }
   const body = await c.req.json<Record<string, unknown>>().catch(() => ({}) as Record<string, unknown>);
   const sets: string[] = [];
   const params: unknown[] = [];
   if (typeof body.displayName === 'string') { sets.push('`displayName` = ?'); params.push(body.displayName); }
   if (typeof body.locale === 'string')      { sets.push('`locale` = ?');      params.push(body.locale); }
-  if (typeof body.password === 'string')    { sets.push('`passwordHash` = ?'); params.push(await hashPassword(body.password)); }
-  if (typeof body.roleId === 'number' && !isSelf &&
-      can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageUsers')) {
+  const passwordChanged = typeof body.password === 'string';
+  if (passwordChanged) { sets.push('`passwordHash` = ?'); params.push(await hashPassword(body.password as string)); }
+  if (typeof body.roleId === 'number' && !isSelf) {
+    // Assigning a role requires that the actor already holds its capabilities.
+    const newRole = await findRoleById(body.roleId);
+    if (!newRole) return errorResponse(c, 'validationError', 'unknown role', 422);
+    if (!grantsWithinActor(auth.role.capabilities, newRole.capabilities)) {
+      return errorResponse(c, 'forbidden', 'cannot assign a role more privileged than your own', 403);
+    }
     sets.push('`roleId` = ?'); params.push(body.roleId);
   }
   if (sets.length === 0) return errorResponse(c, 'validationError', 'no updatable fields', 422);
   params.push(id);
   const r = await execute(`UPDATE \`users\` SET ${sets.join(', ')} WHERE \`id\` = ?`, params);
   if (r.affectedRows === 0) return errorResponse(c, 'notFound', 'user not found', 404);
+  // A password change invalidates the user's existing sessions so a stolen
+  // cookie can't outlive a reset.
+  if (passwordChanged) await deleteAllSessionsForUser(id);
   return c.body(null, 204);
 });
 
 userRoutes.post('/:id/suspend', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageUsers')) {
     return errorResponse(c, 'forbidden', 'manageUsers capability required', 403);
   }
@@ -140,7 +169,7 @@ userRoutes.post('/:id/suspend', async (c) => {
 
 userRoutes.post('/:id/unsuspend', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageUsers')) {
     return errorResponse(c, 'forbidden', 'manageUsers capability required', 403);
   }
@@ -154,14 +183,14 @@ userRoutes.post('/:id/unsuspend', async (c) => {
 
 roleRoutes.get('/', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   const roles = await listRoles();
   return c.json({ data: roles });
 });
 
 roleRoutes.post('/', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageRoles')) {
     return errorResponse(c, 'forbidden', 'manageRoles capability required', 403);
   }
@@ -169,6 +198,12 @@ roleRoutes.post('/', async (c) => {
     .catch(() => ({}) as { slug?: string; label?: string; capabilities?: unknown });
   if (!body.slug || !body.label || !body.capabilities) {
     return errorResponse(c, 'validationError', 'slug, label, capabilities required', 422);
+  }
+  if (!isCapabilitiesShape(body.capabilities)) {
+    return errorResponse(c, 'validationError', 'capabilities must be { global: string[], types: Record<string, string[]> }', 422);
+  }
+  if (!grantsWithinActor(auth.role.capabilities, body.capabilities)) {
+    return errorResponse(c, 'forbidden', 'cannot grant capabilities you do not hold', 403);
   }
   const dup = await queryOne<{ id: number }>('SELECT `id` FROM `roles` WHERE `slug` = ?', [body.slug]);
   if (dup) return errorResponse(c, 'conflict', 'role slug exists', 409);
@@ -181,17 +216,32 @@ roleRoutes.post('/', async (c) => {
 
 roleRoutes.patch('/:slug', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageRoles')) {
     return errorResponse(c, 'forbidden', 'manageRoles capability required', 403);
   }
   const slug = c.req.param('slug');
+  const role = await queryOne<{ id: number; isBuiltin: number }>(
+    'SELECT `id`, `isBuiltin` FROM `roles` WHERE `slug` = ?', [slug],
+  );
+  if (!role) return errorResponse(c, 'notFound', 'role not found', 404);
+  // Built-in roles are the security baseline; editing their capabilities is a
+  // privilege-escalation vector (e.g. granting `viewer` the '*' wildcard).
+  if (role.isBuiltin) return errorResponse(c, 'conflict', 'cannot modify a built-in role', 409);
   const body = await c.req.json<{ label?: string; capabilities?: unknown }>()
     .catch(() => ({}) as { label?: string; capabilities?: unknown });
   const sets: string[] = [];
   const params: unknown[] = [];
   if (body.label !== undefined) { sets.push('`label` = ?'); params.push(body.label); }
-  if (body.capabilities !== undefined) { sets.push('`capabilities` = ?'); params.push(JSON.stringify(body.capabilities)); }
+  if (body.capabilities !== undefined) {
+    if (!isCapabilitiesShape(body.capabilities)) {
+      return errorResponse(c, 'validationError', 'invalid capabilities shape', 422);
+    }
+    if (!grantsWithinActor(auth.role.capabilities, body.capabilities)) {
+      return errorResponse(c, 'forbidden', 'cannot grant capabilities you do not hold', 403);
+    }
+    sets.push('`capabilities` = ?'); params.push(JSON.stringify(body.capabilities));
+  }
   if (sets.length === 0) return errorResponse(c, 'validationError', 'nothing to update', 422);
   params.push(slug);
   const r = await execute(`UPDATE \`roles\` SET ${sets.join(', ')} WHERE \`slug\` = ?`, params);
@@ -201,7 +251,7 @@ roleRoutes.patch('/:slug', async (c) => {
 
 roleRoutes.delete('/:slug', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageRoles')) {
     return errorResponse(c, 'forbidden', 'manageRoles capability required', 403);
   }

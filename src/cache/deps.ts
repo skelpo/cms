@@ -28,6 +28,8 @@ export interface CacheEntry {
   etag: string;
   deps: DepKey[];
   storedAt: number;
+  /** Per-route Cache-Control override, preserved so cache HITS emit it too. */
+  cacheControl?: string;
   // Optional pre-compressed body (brotli/gzip) — added later when we wire
   // compression in the hot path.
   brotli?: Uint8Array;
@@ -38,20 +40,47 @@ export interface CacheEntry {
 import { LruMap } from './lru.js';
 
 const MAX_ENTRIES = 5_000;
-const cache = new LruMap<CacheKey, CacheEntry>(MAX_ENTRIES);
+const TTL_MS = 5 * 60_000; // hard staleness bound — safety net for a missed/racy invalidation
 const deps = new Map<DepKey, Set<CacheKey>>();
 
+// Monotonic counter bumped on every invalidation. withCache() snapshots it
+// before computing a miss and refuses to store the result if it changed in the
+// meantime — closing the compute-vs-invalidate race that would otherwise cache
+// pre-write data indefinitely (there is no write-through path).
+let generation = 0;
+export function currentGeneration(): number { return generation; }
+
+function detachDeps(key: CacheKey, entryDeps: DepKey[]): void {
+  for (const d of entryDeps) {
+    const set = deps.get(d);
+    if (set) {
+      set.delete(key);
+      if (set.size === 0) deps.delete(d); // don't leak empty dep entries
+    }
+  }
+}
+
+const cache = new LruMap<CacheKey, CacheEntry>(MAX_ENTRIES, (key, entry) => {
+  // On LRU eviction, detach the evicted key from the reverse index so the
+  // dependency graph doesn't grow without bound as entries churn.
+  detachDeps(key, entry.deps);
+});
+
 export function cacheGet(key: CacheKey): CacheEntry | undefined {
-  return cache.get(key);
+  const entry = cache.get(key);
+  if (!entry) return undefined;
+  if (Date.now() - entry.storedAt > TTL_MS) {
+    cacheDelete(key);
+    return undefined;
+  }
+  return entry;
 }
 
 export function cacheSet(key: CacheKey, entry: CacheEntry): void {
   // Drop any previous registration for this key so its old deps don't
   // accumulate stale pointers.
   const prev = cache.get(key);
-  if (prev) {
-    for (const d of prev.deps) deps.get(d)?.delete(key);
-  }
+  if (prev) detachDeps(key, prev.deps);
   cache.set(key, entry);
   for (const d of entry.deps) {
     let set = deps.get(d);
@@ -66,7 +95,7 @@ export function cacheSet(key: CacheKey, entry: CacheEntry): void {
 export function cacheDelete(key: CacheKey): void {
   const entry = cache.get(key);
   if (entry) {
-    for (const d of entry.deps) deps.get(d)?.delete(key);
+    detachDeps(key, entry.deps);
     cache.delete(key);
   }
 }
@@ -94,6 +123,9 @@ export function invalidate(depKeys: DepKey[], opts: { prefix?: boolean } = {}): 
     }
   }
   for (const ck of toRemove) cacheDelete(ck);
+  // Bump unconditionally: even a 0-removal invalidate must signal in-flight
+  // computes (the racy case is precisely when the entry isn't cached yet).
+  generation++;
   return toRemove.size;
 }
 
@@ -102,6 +134,7 @@ export function flushAll(): number {
   const n = cache.size;
   cache.clear();
   deps.clear();
+  generation++;
   return n;
 }
 

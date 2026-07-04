@@ -87,6 +87,14 @@ function interpolate(tpl: string, vars: Record<string, string>): string {
   return tpl.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, k: string) => vars[k] ?? '');
 }
 
+export function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 /** Render a built-in/admin-edited template by slug and send it. */
 export async function sendTemplatedEmail(
   templateSlug: string,
@@ -106,10 +114,18 @@ export async function sendTemplatedEmail(
     );
   }
   if (!tpl) throw new Error(`Email template not found: ${templateSlug}`);
+  // Escape user-controlled values before they land in the HTML body. Variables
+  // whose name ends in "Html" are pre-formatted, trusted HTML built by us
+  // (e.g. submissionHtml) and pass through as-is; everything else (displayName,
+  // form values, …) is escaped to prevent HTML/email injection.
+  const htmlVars: Record<string, string> = {};
+  for (const [k, v] of Object.entries(vars)) {
+    htmlVars[k] = /html$/i.test(k) ? v : escapeHtml(v);
+  }
   await getEmailBackend().send({
     to,
     subject: interpolate(tpl.subject, vars),
-    html: interpolate(tpl.bodyHtml, vars),
+    html: interpolate(tpl.bodyHtml, htmlVars),
     text: interpolate(tpl.bodyText, vars),
   });
 }

@@ -1,11 +1,11 @@
 // /api/v1/settings/*
 
 import { Hono } from 'hono';
-import { getAllSettings, getSetting, setSetting, invalidateSettingsCache } from '../../settings/store.js';
+import { getAllSettings, getPublicSettings, getSetting, isSensitiveSettingKey, setSetting, invalidateSettingsCache } from '../../settings/store.js';
 import { invalidate } from '../../cache/deps.js';
 import { withCache } from '../../cache/respond.js';
 import { errorResponse } from './_helpers.js';
-import { requireAuth } from '../../auth/middleware.js';
+import { requireAuth, isResponse } from '../../auth/middleware.js';
 import { can } from '../../permissions/check.js';
 
 export const settingsRoutes = new Hono();
@@ -13,10 +13,19 @@ export const settingsRoutes = new Hono();
 // ─── GET /settings ───────────────────────────────────────────────────────
 
 settingsRoutes.get('/', async (c) => {
+  const auth = c.get('auth');
+  const canManage = !!auth && can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageSettings');
+  if (canManage) {
+    // Full view for settings managers — not cached (the response varies by
+    // privilege, and must never populate the shared public cache with secrets).
+    return c.json({ data: await getAllSettings() });
+  }
+  // Anonymous/public callers get the sensitive keys filtered out.
   return withCache(c, 'GET:/settings', async (deps) => {
-    const all = await getAllSettings();
-    for (const key of Object.keys(all)) deps.addSetting(key);
-    return { body: { data: all } };
+    deps.add('settings:all'); // umbrella dep so any settings write invalidates this list
+    const pub = await getPublicSettings();
+    for (const key of Object.keys(pub)) deps.addSetting(key);
+    return { body: { data: pub } };
   });
 });
 
@@ -24,6 +33,16 @@ settingsRoutes.get('/', async (c) => {
 
 settingsRoutes.get('/:key', async (c) => {
   const key = c.req.param('key');
+  const auth = c.get('auth');
+  const canManage = !!auth && can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageSettings');
+  // Sensitive keys (previewToken, secrets, credentials) are never cached and
+  // are only readable by settings managers.
+  if (isSensitiveSettingKey(key)) {
+    if (!canManage) return errorResponse(c, 'notFound', `Setting '${key}' not set`, 404);
+    const v = await getSetting(key, null);
+    if (v === null) return errorResponse(c, 'notFound', `Setting '${key}' not set`, 404);
+    return c.json({ data: { [key]: v } });
+  }
   return withCache(c, `GET:/settings/${key}`, async (deps) => {
     deps.addSetting(key);
     const v = await getSetting(key, null);
@@ -36,7 +55,7 @@ settingsRoutes.get('/:key', async (c) => {
 
 settingsRoutes.put('/:key', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageSettings')) {
     return errorResponse(c, 'forbidden', 'manageSettings capability required', 403);
   }
@@ -48,7 +67,7 @@ settingsRoutes.put('/:key', async (c) => {
   await setSetting(key, body.value, auth.user.id);
   invalidateSettingsCache();
   invalidate([`setting:${key}`]);
-  invalidate(['GET:/settings'], { prefix: true });
+  invalidate(['settings:all']);
   return c.json({ data: { [key]: body.value } });
 });
 
@@ -56,7 +75,7 @@ settingsRoutes.put('/:key', async (c) => {
 
 settingsRoutes.put('/', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageSettings')) {
     return errorResponse(c, 'forbidden', 'manageSettings capability required', 403);
   }
@@ -68,6 +87,6 @@ settingsRoutes.put('/', async (c) => {
   }
   invalidateSettingsCache();
   invalidate(invalidated);
-  invalidate(['GET:/settings'], { prefix: true });
+  invalidate(['settings:all']);
   return c.json({ data: body });
 });

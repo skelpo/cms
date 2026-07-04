@@ -9,7 +9,6 @@ import {
   markDone,
   markFailed,
   recoverStuckJobs,
-  enqueue,
   type JobKind,
   type JobRow,
 } from './queue.js';
@@ -20,6 +19,8 @@ import { pruneOldLoginAttempts } from '../auth/ratelimit.js';
 
 const WORKER_ID = `w_${Math.random().toString(36).slice(2, 10)}`;
 let timer: ReturnType<typeof setInterval> | null = null;
+let maintenanceTimer: ReturnType<typeof setInterval> | null = null;
+let schedulerTimer: ReturnType<typeof setInterval> | null = null;
 let running = false;
 
 type Handler = (payload: Record<string, unknown>) => Promise<void>;
@@ -47,14 +48,61 @@ const handlers: Record<JobKind, Handler> = {
   imgproxyWarm: async () => { /* future: pre-generate variants */ },
   pruneSessions: async () => { await pruneExpiredSessions(); },
   pruneLoginAttempts: async () => { await pruneOldLoginAttempts(); },
-  pruneContentRevisions: async () => {
-    const { execute } = await import('../db/client.js');
-    await execute(
-      `DELETE FROM \`contentRevisions\`
-        WHERE \`reason\` = 'autosave' AND \`createdAt\` < (NOW() - INTERVAL 30 DAY)`,
-    );
-  },
+  pruneContentRevisions: async () => { await pruneAutosaveRevisions(); },
 };
+
+async function pruneAutosaveRevisions(): Promise<void> {
+  const { execute } = await import('../db/client.js');
+  await execute(
+    `DELETE FROM \`contentRevisions\`
+      WHERE \`reason\` = 'autosave' AND \`createdAt\` < (NOW() - INTERVAL 30 DAY)`,
+  );
+}
+
+// Publish content whose scheduledAt has arrived. There was previously no
+// producer for this at all — scheduled posts never went live. Runs on a short
+// interval; publishContent stamps publishedAt + status and we invalidate the
+// content caches and fire the webhook event, matching the manual publish path.
+async function publishDueScheduled(): Promise<void> {
+  const { query } = await import('../db/client.js');
+  const { publishContent } = await import('../content/writer.js');
+  const { invalidate } = await import('../cache/deps.js');
+  const { fireEvent } = await import('../webhooks/dispatch.js');
+  const due = await query<{ id: number; typeSlug: string; locale: string; authorId: number }>(
+    `SELECT \`id\`, \`typeSlug\`, \`locale\`, \`authorId\` FROM \`content\`
+      WHERE \`scheduledAt\` IS NOT NULL AND \`scheduledAt\` <= NOW()
+        AND \`status\` NOT IN ('published','archived')
+      ORDER BY \`scheduledAt\` ASC
+      LIMIT 50`,
+  );
+  for (const row of due) {
+    const result = await publishContent(row.id, row.authorId ?? 0);
+    if (!result.ok) {
+      console.error(`[jobs] scheduled publish blocked for content ${row.id}:`, result.errors[0]?.message);
+      continue;
+    }
+    invalidate([`content:${row.id}`]);
+    invalidate([`type-list:${row.typeSlug}:${row.locale}`], { prefix: true });
+    await fireEvent(
+      'content.published',
+      { id: row.id, type: row.typeSlug, locale: row.locale },
+      [`content:${row.id}`, `type-list:${row.typeSlug}:${row.locale}`],
+    );
+  }
+}
+
+// Bound each handler well below the 10-minute stuck-job lease so a hung handler
+// (e.g. a slow email/webhook endpoint) is failed + retried before
+// recoverStuckJobs could re-claim it and cause a concurrent second execution.
+const HANDLER_TIMEOUT_MS = 5 * 60_000;
+
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let timerId: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timerId = setTimeout(() => reject(new Error(`job handler timed out after ${ms}ms: ${label}`)), ms);
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timerId));
+}
 
 async function processOne(): Promise<boolean> {
   const job: JobRow | null = await claimNext(WORKER_ID);
@@ -64,10 +112,13 @@ async function processOne(): Promise<boolean> {
     if (!handler) throw new Error(`No handler for job kind: ${job.kind}`);
     const payload =
       typeof job.payload === 'string' ? JSON.parse(job.payload) : job.payload;
-    await handler(payload as Record<string, unknown>);
+    await withTimeout(handler(payload as Record<string, unknown>), HANDLER_TIMEOUT_MS, job.kind);
     await markDone(job.id);
   } catch (err) {
-    await markFailed(job.id, (err as Error).message, job.attempts, job.maxAttempts);
+    // Coerce non-Error throws (strings/undefined) so markFailed's .slice never
+    // throws inside the catch and strands the job as 'running'.
+    const msg = String((err as Error)?.message ?? err);
+    await markFailed(job.id, msg, job.attempts, job.maxAttempts);
   }
   return true;
 }
@@ -94,17 +145,31 @@ export function startWorker(intervalMs = 2000): void {
   timer = setInterval(() => {
     void tick();
     // Every ~60 ticks, recover stuck jobs.
-    if (++recoverCounter % 60 === 0) void recoverStuckJobs();
+    if (++recoverCounter % 60 === 0) {
+      void recoverStuckJobs().catch((err) => console.error('[jobs] recoverStuckJobs failed:', err));
+    }
   }, intervalMs);
 
-  // Seed recurring maintenance jobs (idempotent enough — they're cheap).
-  void enqueue('pruneSessions', {}, { runAt: new Date(Date.now() + 60_000) });
-  void enqueue('pruneLoginAttempts', {}, { runAt: new Date(Date.now() + 120_000) });
+  // Recurring maintenance — driven directly off process-lifetime intervals
+  // rather than one-shot seeded jobs (which only ever ran once per boot and let
+  // sessions/loginAttempts/autosave-revisions grow without bound).
+  const runMaintenance = (): void => {
+    void pruneExpiredSessions().catch((err) => console.error('[jobs] pruneSessions failed:', err));
+    void pruneOldLoginAttempts().catch((err) => console.error('[jobs] pruneLoginAttempts failed:', err));
+    void pruneAutosaveRevisions().catch((err) => console.error('[jobs] pruneContentRevisions failed:', err));
+  };
+  runMaintenance(); // initial sweep (DB is up: migrations ran before startWorker)
+  maintenanceTimer = setInterval(runMaintenance, 3_600_000);
+
+  // Scheduled-content publisher — checks every 60s for posts whose scheduledAt
+  // has arrived.
+  schedulerTimer = setInterval(() => {
+    void publishDueScheduled().catch((err) => console.error('[jobs] publishDueScheduled failed:', err));
+  }, 60_000);
 }
 
 export function stopWorker(): void {
-  if (timer) {
-    clearInterval(timer);
-    timer = null;
-  }
+  if (timer) { clearInterval(timer); timer = null; }
+  if (maintenanceTimer) { clearInterval(maintenanceTimer); maintenanceTimer = null; }
+  if (schedulerTimer) { clearInterval(schedulerTimer); schedulerTimer = null; }
 }

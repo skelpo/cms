@@ -3,6 +3,7 @@
 
 import { execute, queryOne } from '../db/client.js';
 import { getTypeBySlug, type FieldDef } from './types.js';
+import { migrateFields } from './schemaEvolution.js';
 import type { ContentStatus, ContentDbRow } from './content.js';
 
 export interface CreateContentInput {
@@ -79,13 +80,19 @@ function validateFields(fields: Record<string, unknown>, defs: FieldDef[]): Vali
       }
       if (def.type === 'number') {
         const n = Number(v);
-        const min = def.validation.min as number | undefined;
-        const max = def.validation.max as number | undefined;
-        if (typeof min === 'number' && n < min) {
-          errors.push({ field: def.name, constraint: 'min', message: `Field '${def.name}' must be ≥ ${min}` });
-        }
-        if (typeof max === 'number' && n > max) {
-          errors.push({ field: def.name, constraint: 'max', message: `Field '${def.name}' must be ≤ ${max}` });
+        if (!Number.isFinite(n)) {
+          // Guards against a retype leaving a non-numeric string in a number
+          // field (NaN comparisons are always false, so it would otherwise pass).
+          errors.push({ field: def.name, constraint: 'type', message: `Field '${def.name}' must be a number` });
+        } else {
+          const min = def.validation.min as number | undefined;
+          const max = def.validation.max as number | undefined;
+          if (typeof min === 'number' && n < min) {
+            errors.push({ field: def.name, constraint: 'min', message: `Field '${def.name}' must be ≥ ${min}` });
+          }
+          if (typeof max === 'number' && n > max) {
+            errors.push({ field: def.name, constraint: 'max', message: `Field '${def.name}' must be ≤ ${max}` });
+          }
         }
       }
       if (def.type === 'select' || def.type === 'multiselect') {
@@ -226,25 +233,58 @@ export async function updateContent(
     if (dup) return { ok: false, errors: [{ field: 'slug', constraint: 'unique', message: 'slug already taken' }], status: 409 };
   }
 
-  // Build SET clause incrementally.
-  const sets: string[] = ['`revision` = `revision` + 1'];
-  const params: unknown[] = [];
+  // Optimistic concurrency: bump to a known revision and gate the UPDATE on the
+  // revision we read, so two racing editors can't silently interleave — the
+  // loser gets a 409 instead of a lost update / dropped revision snapshot.
+  const newRevision = existing.revision + 1;
+  const sets: string[] = ['`revision` = ?'];
+  const params: unknown[] = [newRevision];
   if (patch.title !== undefined) { sets.push('`title` = ?'); params.push(patch.title); }
   if (patch.slug  !== undefined) { sets.push('`slug` = ?');  params.push(patch.slug); }
-  if (patch.fields !== undefined) { sets.push('`fields` = ?'); params.push(JSON.stringify(patch.fields)); }
+  if (patch.fields !== undefined) {
+    sets.push('`fields` = ?'); params.push(JSON.stringify(patch.fields));
+    // The submitted fields are already in the current schema shape, so advance
+    // schemaRevision — otherwise lazy migration keeps re-running on every read.
+    const type = await getTypeBySlug(existing.typeSlug);
+    if (type) { sets.push('`schemaRevision` = ?'); params.push(type.currentRevision); }
+  }
   if (patch.seo    !== undefined) { sets.push('`seo` = ?');    params.push(JSON.stringify(patch.seo)); }
   if (patch.ai     !== undefined) { sets.push('`ai` = ?');     params.push(JSON.stringify(patch.ai)); }
-  if (patch.status !== undefined) { sets.push('`status` = ?'); params.push(patch.status); }
+  if (patch.status !== undefined) {
+    sets.push('`status` = ?'); params.push(patch.status);
+    // Transitioning to published without an explicit timestamp stamps
+    // publishedAt so the row isn't left NULL (which breaks date filters/sort).
+    if (patch.status === 'published' && patch.publishedAt === undefined) {
+      sets.push('`publishedAt` = COALESCE(`publishedAt`, NOW())');
+    }
+  }
   if (patch.publishedAt !== undefined) { sets.push('`publishedAt` = ?'); params.push(patch.publishedAt); }
   if (patch.scheduledAt !== undefined) { sets.push('`scheduledAt` = ?'); params.push(patch.scheduledAt); }
 
-  params.push(id);
-  await execute(`UPDATE \`content\` SET ${sets.join(', ')} WHERE \`id\` = ?`, params);
+  params.push(id, existing.revision);
+  const upd = await execute(
+    `UPDATE \`content\` SET ${sets.join(', ')} WHERE \`id\` = ? AND \`revision\` = ?`,
+    params,
+  );
+  if (upd.affectedRows === 0) {
+    return {
+      ok: false,
+      errors: [{ field: '', constraint: 'conflict', message: 'Content was modified by someone else; reload and retry' }],
+      status: 409,
+    };
+  }
 
-  const updated = await queryOne<ContentDbRow>('SELECT * FROM `content` WHERE `id` = ?', [id]);
-  if (!updated) return { ok: false, errors: [{ field: '', constraint: 'gone', message: 'Row vanished' }], status: 500 };
-  await saveRevision(id, updated.revision, authorId, 'update');
-  return { ok: true, row: updated };
+  // Snapshot the exact revision we wrote. (A concurrent writer that read our
+  // revision could already have advanced past it; if so, return the current row
+  // without recording a mismatched snapshot.)
+  const updated = await queryOne<ContentDbRow>('SELECT * FROM `content` WHERE `id` = ? AND `revision` = ?', [id, newRevision]);
+  if (updated) {
+    await saveRevision(id, newRevision, authorId, 'update', updated);
+    return { ok: true, row: updated };
+  }
+  const current = await queryOne<ContentDbRow>('SELECT * FROM `content` WHERE `id` = ?', [id]);
+  if (!current) return { ok: false, errors: [{ field: '', constraint: 'gone', message: 'Row vanished' }], status: 500 };
+  return { ok: true, row: current };
 }
 
 export async function deleteContent(id: number, hard = false): Promise<boolean> {
@@ -270,21 +310,32 @@ export async function publishContent(id: number, authorId: number): Promise<{
   const type = await getTypeBySlug(existing.typeSlug);
   if (!type) return { ok: false, errors: [{ field: 'type', constraint: 'missing', message: 'Type missing' }] };
 
-  const fields = typeof existing.fields === 'string' ? JSON.parse(existing.fields) : existing.fields;
-  const seo    = typeof existing.seo === 'string'    ? JSON.parse(existing.seo)    : existing.seo;
+  const rawFields = typeof existing.fields === 'string' ? JSON.parse(existing.fields) : existing.fields;
+  const seo       = typeof existing.seo === 'string'    ? JSON.parse(existing.seo)    : existing.seo;
+  // Migrate stored fields up to the current schema BEFORE validating, so a row
+  // saved under an older revision (e.g. a since-renamed field) isn't rejected
+  // for a field that would read fine post-migration.
+  const fields = await migrateFields(
+    rawFields as Record<string, unknown>,
+    type.id,
+    existing.schemaRevision,
+    type.currentRevision,
+  );
   const errors = [
-    ...validateFields(fields as Record<string, unknown>, type.fieldsSchema.fields),
+    ...validateFields(fields, type.fieldsSchema.fields),
     ...validateSeoForPublish(seo as Record<string, unknown>, existing.title),
   ];
   if (errors.length > 0) return { ok: false, errors };
 
+  // Persist the migrated fields + advance schemaRevision so the row stops
+  // lazily re-migrating on every read.
   await execute(
-    "UPDATE `content` SET `status` = 'published', `publishedAt` = COALESCE(`publishedAt`, NOW()), `revision` = `revision` + 1 WHERE `id` = ?",
-    [id],
+    "UPDATE `content` SET `status` = 'published', `publishedAt` = COALESCE(`publishedAt`, NOW()), `fields` = ?, `schemaRevision` = ?, `revision` = `revision` + 1 WHERE `id` = ?",
+    [JSON.stringify(fields), type.currentRevision, id],
   );
   const updated = await queryOne<ContentDbRow>('SELECT * FROM `content` WHERE `id` = ?', [id]);
   if (!updated) return { ok: false, errors: [{ field: '', constraint: 'gone', message: 'Row vanished' }] };
-  await saveRevision(id, updated.revision, authorId, 'publish');
+  await saveRevision(id, updated.revision, authorId, 'publish', updated);
   return { ok: true, row: updated };
 }
 
@@ -309,8 +360,9 @@ async function saveRevision(
   revision: number,
   authorId: number,
   reason: string,
+  snapshotRow?: ContentDbRow,
 ): Promise<void> {
-  const row = await queryOne<ContentDbRow>('SELECT * FROM `content` WHERE `id` = ?', [contentId]);
+  const row = snapshotRow ?? await queryOne<ContentDbRow>('SELECT * FROM `content` WHERE `id` = ?', [contentId]);
   if (!row) return;
   await execute(
     `INSERT IGNORE INTO \`contentRevisions\`

@@ -69,7 +69,7 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-          cache-dependency-path: ${{ steps.meta.outputs.dir }}/package-lock.json
+          cache-dependency-path: package-lock.json
 
       - name: Log toolchain
         run: |
@@ -86,9 +86,18 @@ jobs:
             exit 1
           fi
 
-      - name: Install
-        working-directory: ${{ steps.meta.outputs.dir }}
-        run: npm ci || npm install --no-audit --no-fund
+      # Install from the workspace ROOT — the root package-lock.json is the
+      # single authoritative lockfile (per-package lockfiles were removed; they
+      # drifted out of sync and silently forced a non-deterministic `npm install`).
+      - name: Install (workspace root)
+        run: npm ci --include-workspace-root --workspaces
+
+      # Publish gate: don't ship if the packages' own tests are red. These live
+      # in the root tests/unit suite (cms-client.test.ts / site-kit.test.ts).
+      - name: Unit tests (publish gate)
+        env:
+          SESSION_SECRET: ci_release_secret_ci_release_secret_ci_release_secret_ci
+        run: npm run test:unit
 
       - name: Build
         working-directory: ${{ steps.meta.outputs.dir }}

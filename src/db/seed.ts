@@ -248,7 +248,12 @@ const BUILTIN_MENUS = [
 // ────────────────────────────────────────────────────────────────────────
 
 export async function runSeed(): Promise<{ inserted: Record<string, number> }> {
-  const inserted: Record<string, number> = {
+  // Concrete keyed type (not Record<string, number>) so member access is `number`
+  // rather than `number | undefined` under noUncheckedIndexedAccess. That lets us
+  // write `inserted.roles++` without a `!` non-null assertion — Perry's AOT
+  // compiler rejects an update expression on an asserted member (`x!++`, error
+  // U006), and `Record` access would otherwise force that assertion.
+  const inserted = {
     roles: 0,
     contentTypes: 0,
     emailTemplates: 0,
@@ -264,7 +269,7 @@ export async function runSeed(): Promise<{ inserted: Record<string, number> }> {
       'INSERT INTO `roles` (`slug`, `label`, `capabilities`, `isBuiltin`) VALUES (?, ?, ?, 1)',
       [r.slug, r.label, JSON.stringify(r.capabilities)],
     );
-    inserted.roles!++;
+    inserted.roles++;
   }
 
   // Content types (+ initial revision row)
@@ -296,7 +301,7 @@ export async function runSeed(): Promise<{ inserted: Record<string, number> }> {
        VALUES (?, 1, ?, ?, 'initial')`,
       [typeId, JSON.stringify(t.fieldsSchema), JSON.stringify({ added: [], removed: [], renamed: [], retyped: [] })],
     );
-    inserted.contentTypes!++;
+    inserted.contentTypes++;
   }
 
   // Email templates
@@ -312,7 +317,7 @@ export async function runSeed(): Promise<{ inserted: Record<string, number> }> {
        VALUES (?, 'en', ?, ?, ?, ?, 1)`,
       [e.slug, e.subject, e.bodyHtml, e.bodyText, JSON.stringify(e.variables)],
     );
-    inserted.emailTemplates!++;
+    inserted.emailTemplates++;
   }
 
   // Settings
@@ -326,7 +331,7 @@ export async function runSeed(): Promise<{ inserted: Record<string, number> }> {
       key,
       JSON.stringify(value),
     ]);
-    inserted.settings!++;
+    inserted.settings++;
   }
 
   // Menus
@@ -337,7 +342,7 @@ export async function runSeed(): Promise<{ inserted: Record<string, number> }> {
       m.slug,
       m.label,
     ]);
-    inserted.menus!++;
+    inserted.menus++;
   }
 
   return { inserted };

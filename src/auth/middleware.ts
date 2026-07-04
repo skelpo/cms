@@ -70,3 +70,15 @@ export function requireAuth(c: Context): AuthContext | Response {
   }
   return auth;
 }
+
+/**
+ * Discriminate the `AuthContext | Response` union returned by requireAuth()/
+ * gate helpers WITHOUT relying on `instanceof Response`. Under the Perry
+ * runtime the native fetch handle has no prototype link, so `x instanceof
+ * Response` is ALWAYS false — which silently skips the guard and, on routes
+ * that don't dereference `.user` afterwards, fails open. AuthContext always
+ * carries a `.user`; a Response never does. Portable to Node/Bun.
+ */
+export function isResponse(x: AuthContext | Response): x is Response {
+  return (x as AuthContext).user === undefined;
+}

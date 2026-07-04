@@ -16,7 +16,7 @@ import { getDefaultLocale } from '../../settings/store.js';
 import { withCache } from '../../cache/respond.js';
 import { invalidate } from '../../cache/deps.js';
 import { errorResponse } from './_helpers.js';
-import { requireAuth } from '../../auth/middleware.js';
+import { requireAuth, isResponse } from '../../auth/middleware.js';
 import { can } from '../../permissions/check.js';
 
 export const menuRoutes = new Hono();
@@ -24,7 +24,8 @@ export const menuRoutes = new Hono();
 // ─── GET /menus (list) ───────────────────────────────────────────────────
 
 menuRoutes.get('/', async (c) => {
-  return withCache(c, 'GET:/menus', async () => {
+  return withCache(c, 'GET:/menus', async (deps) => {
+    deps.add('menus:all'); // umbrella dep so create/rename/delete can invalidate this list
     const menus = await listMenus();
     return { body: { data: menus } };
   });
@@ -50,7 +51,7 @@ menuRoutes.get('/:slug', async (c) => {
 
 menuRoutes.post('/', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageMenus')) {
     return errorResponse(c, 'forbidden', 'manageMenus capability required', 403);
   }
@@ -59,7 +60,7 @@ menuRoutes.post('/', async (c) => {
   const label = String(body.label ?? '').trim();
   if (!slug || !label) return errorResponse(c, 'validationError', 'slug and label required', 422);
   const menu = await createMenu({ slug, label });
-  invalidate(['GET:/menus'], { prefix: true });
+  invalidate(['menus:all']);
   return c.json({ data: menu }, 201);
 });
 
@@ -67,7 +68,7 @@ menuRoutes.post('/', async (c) => {
 
 menuRoutes.patch('/:slug', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageMenus')) {
     return errorResponse(c, 'forbidden', 'manageMenus capability required', 403);
   }
@@ -78,6 +79,7 @@ menuRoutes.patch('/:slug', async (c) => {
   const updated = await updateMenu(slug, patch);
   if (!updated) return errorResponse(c, 'notFound', 'Menu not found', 404);
   invalidate([`menu:${slug}`], { prefix: true });
+  invalidate(['menus:all']);
   return c.json({ data: updated });
 });
 
@@ -85,7 +87,7 @@ menuRoutes.patch('/:slug', async (c) => {
 
 menuRoutes.delete('/:slug', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageMenus')) {
     return errorResponse(c, 'forbidden', 'manageMenus capability required', 403);
   }
@@ -93,6 +95,7 @@ menuRoutes.delete('/:slug', async (c) => {
   const ok = await deleteMenu(slug);
   if (!ok) return errorResponse(c, 'conflict', 'Cannot delete: not found or built-in', 409);
   invalidate([`menu:${slug}`], { prefix: true });
+  invalidate(['menus:all']);
   return c.body(null, 204);
 });
 
@@ -100,7 +103,7 @@ menuRoutes.delete('/:slug', async (c) => {
 
 menuRoutes.post('/:slug/items', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageMenus')) {
     return errorResponse(c, 'forbidden', 'manageMenus capability required', 403);
   }
@@ -142,7 +145,7 @@ menuRoutes.post('/:slug/items', async (c) => {
 
 menuRoutes.patch('/:slug/items/:id', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageMenus')) {
     return errorResponse(c, 'forbidden', 'manageMenus capability required', 403);
   }
@@ -161,7 +164,7 @@ menuRoutes.patch('/:slug/items/:id', async (c) => {
 
 menuRoutes.delete('/:slug/items/:id', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageMenus')) {
     return errorResponse(c, 'forbidden', 'manageMenus capability required', 403);
   }
@@ -180,7 +183,7 @@ menuRoutes.delete('/:slug/items/:id', async (c) => {
 
 menuRoutes.post('/:slug/items/reorder', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageMenus')) {
     return errorResponse(c, 'forbidden', 'manageMenus capability required', 403);
   }

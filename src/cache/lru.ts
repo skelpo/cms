@@ -7,10 +7,12 @@
 export class LruMap<K, V> {
   private readonly maxEntries: number;
   private readonly store = new Map<K, V>();
+  private readonly onEvict?: (key: K, value: V) => void;
 
-  constructor(maxEntries: number) {
+  constructor(maxEntries: number, onEvict?: (key: K, value: V) => void) {
     if (maxEntries <= 0) throw new Error('maxEntries must be positive');
     this.maxEntries = maxEntries;
+    this.onEvict = onEvict;
   }
 
   get(key: K): V | undefined {
@@ -30,9 +32,14 @@ export class LruMap<K, V> {
     if (this.store.has(key)) {
       this.store.delete(key);
     } else if (this.store.size >= this.maxEntries) {
-      // Evict oldest (insertion-order first key).
+      // Evict oldest (insertion-order first key), notifying the owner so it can
+      // release any side structures (e.g. the cache dependency graph).
       const oldest = this.store.keys().next().value;
-      if (oldest !== undefined) this.store.delete(oldest);
+      if (oldest !== undefined) {
+        const evicted = this.store.get(oldest);
+        this.store.delete(oldest);
+        if (evicted !== undefined) this.onEvict?.(oldest, evicted);
+      }
     }
     this.store.set(key, value);
   }

@@ -10,8 +10,9 @@ import { findBySlug } from '../../content/content.js';
 import { enqueue } from '../../jobs/queue.js';
 import { fireEvent } from '../../webhooks/dispatch.js';
 import { getDefaultLocale } from '../../settings/store.js';
+import { escapeHtml } from '../../email/adapter.js';
 import { errorResponse, clientIp, userAgent } from './_helpers.js';
-import { requireAuth } from '../../auth/middleware.js';
+import { requireAuth, isResponse } from '../../auth/middleware.js';
 import { can } from '../../permissions/check.js';
 
 export const formRoutes = new Hono();
@@ -84,7 +85,7 @@ formRoutes.post('/:slug/submit', async (c) => {
       variables: {
         formName: form.title,
         submissionText: Object.entries(clean).map(([k, v]) => `${k}: ${String(v)}`).join('\n'),
-        submissionHtml: Object.entries(clean).map(([k, v]) => `<p><b>${k}:</b> ${String(v)}</p>`).join(''),
+        submissionHtml: Object.entries(clean).map(([k, v]) => `<p><b>${escapeHtml(k)}:</b> ${escapeHtml(String(v))}</p>`).join(''),
       },
     });
   }
@@ -125,9 +126,10 @@ function parseFormFields(raw: string | Record<string, unknown>): ParsedForm {
 
 formRoutes.get('/:slug/submissions', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
-  if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageForms')) {
-    return errorResponse(c, 'forbidden', 'manageForms capability required', 403);
+  if (isResponse(auth)) return auth;
+  const fctx = { userId: auth.user.id, caps: auth.role.capabilities };
+  if (!can(fctx, 'viewSubmissions') && !can(fctx, 'manageForms')) {
+    return errorResponse(c, 'forbidden', 'viewSubmissions or manageForms capability required', 403);
   }
   const slug = c.req.param('slug');
   const defaultLocale = await getDefaultLocale();
@@ -146,9 +148,10 @@ formRoutes.get('/:slug/submissions', async (c) => {
 
 formRoutes.delete('/submissions/:id', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
-  if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageForms')) {
-    return errorResponse(c, 'forbidden', 'manageForms capability required', 403);
+  if (isResponse(auth)) return auth;
+  const fctx = { userId: auth.user.id, caps: auth.role.capabilities };
+  if (!can(fctx, 'viewSubmissions') && !can(fctx, 'manageForms')) {
+    return errorResponse(c, 'forbidden', 'viewSubmissions or manageForms capability required', 403);
   }
   const id = Number(c.req.param('id'));
   const r = await execute('DELETE FROM `formSubmissions` WHERE `id` = ?', [id]);
@@ -158,9 +161,10 @@ formRoutes.delete('/submissions/:id', async (c) => {
 
 formRoutes.post('/submissions/:id/mark-spam', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
-  if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageForms')) {
-    return errorResponse(c, 'forbidden', 'manageForms capability required', 403);
+  if (isResponse(auth)) return auth;
+  const fctx = { userId: auth.user.id, caps: auth.role.capabilities };
+  if (!can(fctx, 'viewSubmissions') && !can(fctx, 'manageForms')) {
+    return errorResponse(c, 'forbidden', 'viewSubmissions or manageForms capability required', 403);
   }
   const id = Number(c.req.param('id'));
   await execute('UPDATE `formSubmissions` SET `isSpam` = 1 WHERE `id` = ?', [id]);

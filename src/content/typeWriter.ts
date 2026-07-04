@@ -16,6 +16,19 @@ export interface SchemaChanges {
 
 const EMPTY_CHANGES: SchemaChanges = { added: [], removed: [], renamed: [], retyped: [] };
 
+// Best-effort transform for an auto-detected retype, so a changed field type
+// doesn't silently leave the old (wrong-typed) value in place. An explicit
+// `changes` spec can override this per field.
+function defaultTransform(toType: string): string | undefined {
+  switch (toType) {
+    case 'number':                      return 'parseFloat';
+    case 'boolean':                     return 'toBoolean';
+    case 'multiselect': case 'gallery': return 'toArray';
+    case 'text': case 'textarea': case 'richtext': case 'email': case 'url': return 'toString';
+    default:                            return undefined;
+  }
+}
+
 /** Diff two field-schemas into a SchemaChanges record. */
 export function diffSchema(prev: FieldsSchema, next: FieldsSchema): SchemaChanges {
   const prevByName = new Map(prev.fields.map((f) => [f.name, f]));
@@ -30,7 +43,7 @@ export function diffSchema(prev: FieldsSchema, next: FieldsSchema): SchemaChange
     } else {
       const pf = prevByName.get(name)!;
       if (pf.type !== def.type) {
-        changes.retyped.push({ name, from: pf.type, to: def.type });
+        changes.retyped.push({ name, from: pf.type, to: def.type, transform: defaultTransform(def.type) });
       }
     }
   }
@@ -108,14 +121,14 @@ export async function updateType(
   opts: { dryRun?: boolean } = {},
 ): Promise<
   | { ok: true; newRevision?: number; affectedRows?: number }
-  | { ok: false; error: string }
+  | { ok: false; error: string; status?: number }
 > {
   const row = await queryOne<{
     id: number;
     currentRevision: number;
     fieldsSchema: string | FieldsSchema;
   }>('SELECT `id`, `currentRevision`, `fieldsSchema` FROM `contentTypes` WHERE `slug` = ?', [slug]);
-  if (!row) return { ok: false, error: 'type not found' };
+  if (!row) return { ok: false, error: 'type not found', status: 404 };
 
   const prevSchema: FieldsSchema =
     typeof row.fieldsSchema === 'string' ? JSON.parse(row.fieldsSchema) : row.fieldsSchema;
@@ -140,6 +153,17 @@ export async function updateType(
 
   // Schema change → new revision.
   const changes = patch.changes ?? diffSchema(prevSchema, patch.fieldsSchema);
+  // A computed diff can't distinguish a RENAME from a remove+add, so refuse to
+  // auto-apply an ambiguous change (fields both removed and added) without an
+  // explicit `changes` spec — otherwise a rename silently drops the old values
+  // into `_legacy` and the new field reads as empty (data loss).
+  if (!patch.changes && changes.removed.length > 0 && changes.added.length > 0) {
+    return {
+      ok: false,
+      status: 422,
+      error: 'Ambiguous schema change: fields were both added and removed. Pass an explicit `changes` object (renamed/retyped/added/removed) so existing content migrates correctly.',
+    };
+  }
   const affected = await queryOne<{ n: number }>(
     'SELECT COUNT(*) AS n FROM `content` WHERE `typeSlug` = ?',
     [slug],

@@ -261,14 +261,23 @@ export async function listContent(opts: ListContentOptions): Promise<{
     params.push(opts.publishedAfter);
   }
 
-  // Cursor: opaque base64 of { id, publishedAt } for keyset pagination.
+  // Cursor: opaque base64 of { id, publishedAt } for keyset pagination on the
+  // default `-publishedAt` sort. NOTE: the keyset always orders by publishedAt
+  // then id; a non-default `sort` still pages by this keyset (stable forward
+  // paging, but not strictly ordered by the requested column).
   let cursorClause = '';
   if (opts.cursor) {
     try {
       const decoded = JSON.parse(Buffer.from(opts.cursor, 'base64url').toString('utf8'));
-      if (decoded && typeof decoded.publishedAt === 'string' && typeof decoded.id === 'number') {
-        cursorClause = ' AND (`publishedAt` < ? OR (`publishedAt` = ? AND `id` < ?))';
-        params.push(decoded.publishedAt, decoded.publishedAt, decoded.id);
+      if (decoded && typeof decoded.id === 'number') {
+        if (typeof decoded.publishedAt === 'string') {
+          cursorClause = ' AND (`publishedAt` < ? OR (`publishedAt` = ? AND `id` < ?))';
+          params.push(decoded.publishedAt, decoded.publishedAt, decoded.id);
+        } else {
+          // NULL publishedAt (e.g. draft listings): fall back to an id-only keyset.
+          cursorClause = ' AND `id` < ?';
+          params.push(decoded.id);
+        }
       }
     } catch {
       // ignore bad cursors
@@ -286,12 +295,29 @@ export async function listContent(opts: ListContentOptions): Promise<{
   let nextCursor: string | null = null;
   if (rows.length > limit) {
     const last = rows[limit - 1]!;
+    // Serialize publishedAt as the DB datetime STRING. The @perryts/mysql driver
+    // returns TIMESTAMP columns as MyDateTime objects with no toJSON, so
+    // JSON.stringify(last.publishedAt) would emit an object; the decode-side
+    // `typeof === 'string'` check would then always fail, drop the cursor
+    // clause, and page 1 would repeat forever (infinite crawl loop).
     nextCursor = Buffer.from(
-      JSON.stringify({ publishedAt: last.publishedAt, id: last.id }),
+      JSON.stringify({ publishedAt: toDbDatetimeString(last.publishedAt), id: last.id }),
       'utf8',
     ).toString('base64url');
   }
   return { rows: rows.slice(0, limit), nextCursor };
+}
+
+/** Extract the MySQL `YYYY-MM-DD HH:MM:SS` string from a driver datetime value
+ *  (MyDateTime object or already-a-string), or null. Used for keyset cursors,
+ *  which compare against a DATETIME column and so must not carry ISO `T`/`Z`. */
+function toDbDatetimeString(v: unknown): string | null {
+  if (v == null) return null;
+  if (typeof v === 'string') return v;
+  if (typeof v === 'object' && typeof (v as { raw?: unknown }).raw === 'string') {
+    return (v as { raw: string }).raw;
+  }
+  return null;
 }
 
 function parseSort(sort: string): string {

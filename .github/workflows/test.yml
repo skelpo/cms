@@ -51,6 +51,12 @@ jobs:
           (cd packages/cms-client && npm run typecheck)
           (cd packages/site-kit && npm run typecheck)
 
+      - name: Build (compile the shipped dist/ — NodeNext catches ESM issues)
+        run: |
+          npm run build
+          (cd packages/cms-client && npm run build)
+          (cd packages/site-kit && npm run build)
+
       - name: Unit tests
         run: npm run test:unit
 
@@ -62,4 +68,35 @@ jobs:
           DB_PASSWORD: ''
           DB_NAME: skelpo_test
           SESSION_SECRET: ci_test_secret_ci_test_secret_ci_test_secret_ci_test
-        run: npm run test:integration
+        run: |
+          set -o pipefail
+          npm run test:integration 2>&1 | tee /tmp/itest.log
+          # Tripwire: fail if the suite ran zero tests, or skipped ALL of them
+          # (e.g. the MySQL service was unreachable) — otherwise CI is green
+          # having verified nothing.
+          total=$(grep -oE 'tests [0-9]+' /tmp/itest.log | tail -1 | grep -oE '[0-9]+' || echo 0)
+          skipped=$(grep -oE 'skipped [0-9]+' /tmp/itest.log | tail -1 | grep -oE '[0-9]+' || echo 0)
+          if [ "${total:-0}" -eq 0 ]; then echo "::error::integration suite ran 0 tests"; exit 1; fi
+          if [ "${skipped:-0}" -eq "${total:-0}" ]; then echo "::error::all ${total} integration tests were skipped (MySQL unreachable?)"; exit 1; fi
+
+      - name: Boot smoke (compiled dist/server.js serves /healthz)
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: '3306'
+          DB_USER: root
+          DB_PASSWORD: ''
+          DB_NAME: skelpo_test
+          SESSION_SECRET: ci_test_secret_ci_test_secret_ci_test_secret_ci_test
+          PORT: '3137'
+          HOST: 127.0.0.1
+        run: |
+          node dist/server.js &
+          pid=$!
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:3137/healthz" >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          kill "$pid" 2>/dev/null || true
+          if [ "$ok" -ne 1 ]; then echo "::error::compiled dist/server.js did not serve /healthz"; exit 1; fi
+          echo "boot smoke OK"

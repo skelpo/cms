@@ -43,18 +43,69 @@ export async function fireEvent(
   data: Record<string, unknown>,
   depKeys: string[],
 ): Promise<void> {
-  const hooks = await query<WebhookRow>(
-    'SELECT `id`, `url`, `events`, `secret` FROM `webhooks` WHERE `active` = 1',
-  );
-  for (const h of hooks) {
-    const events = parseEvents(h.events);
-    if (!events.includes(event) && !events.includes('*')) continue;
-    await enqueue('webhookDispatch', {
-      webhookId: h.id,
-      event,
-      data,
-      depKeys,
-    });
+  // Fire-and-forget by design (callers `void fireEvent(...)`), so it must never
+  // reject — an unhandled rejection here would crash the process on a transient
+  // DB error. Swallow + log instead.
+  try {
+    const hooks = await query<WebhookRow>(
+      'SELECT `id`, `url`, `events`, `secret` FROM `webhooks` WHERE `active` = 1',
+    );
+    for (const h of hooks) {
+      const events = parseEvents(h.events);
+      if (!events.includes(event) && !events.includes('*')) continue;
+      await enqueue('webhookDispatch', {
+        webhookId: h.id,
+        event,
+        data,
+        depKeys,
+      });
+    }
+  } catch (err) {
+    console.error('[webhooks] fireEvent failed:', err);
+  }
+}
+
+// ── Outbound URL safety (SSRF guard) ──────────────────────────────────────
+//
+// Blocks webhook targets pointing at private / loopback / link-local hosts
+// (incl. the cloud metadata endpoint 169.254.169.254). This is a literal-host
+// check; DNS-rebinding-complete protection would require resolving the host and
+// pinning the connection to a verified public address at delivery time.
+function isBlockedWebhookHost(host: string): boolean {
+  const h = host.toLowerCase().replace(/^\[|\]$/g, ''); // strip IPv6 brackets
+  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.internal') || h.endsWith('.local')) return true;
+  if (h === '::1' || h === '::' || h === '0.0.0.0') return true;
+  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (m) {
+    const a = Number(m[1]);
+    const b = Number(m[2]);
+    if (a === 0 || a === 127 || a === 10) return true;
+    if (a === 169 && b === 254) return true;        // link-local (incl. cloud metadata)
+    if (a === 192 && b === 168) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+  }
+  return false;
+}
+
+/** Throws if `raw` is not a public http(s) URL. */
+export function assertSafeWebhookUrl(raw: string): void {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    throw new Error('webhook url must be an absolute http(s) URL');
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new Error('webhook url must use http or https');
+  }
+  // Opt-in escape hatch for deployments (and the test suite) that intentionally
+  // deliver to an internal host. OFF by default — the SSRF guard is the safe
+  // default; only set WEBHOOK_ALLOW_PRIVATE_HOSTS=true if you trust every
+  // configured webhook target.
+  if (process.env.WEBHOOK_ALLOW_PRIVATE_HOSTS === 'true') return;
+  if (isBlockedWebhookHost(u.hostname)) {
+    throw new Error('webhook url may not target a private, loopback, or link-local host');
   }
 }
 
@@ -108,7 +159,16 @@ export async function deliverWebhookJob(payload: {
   let responseBody = '';
   let error: string | null = null;
   try {
-    const resp = await fetch(hook.url, { method: 'POST', headers, body });
+    // Re-validate at delivery time (the row may predate validation or have been
+    // edited out-of-band) and bound the request so a slow/hung endpoint can't
+    // tie up a worker indefinitely.
+    assertSafeWebhookUrl(hook.url);
+    const resp = await fetch(hook.url, {
+      method: 'POST',
+      headers,
+      body,
+      signal: AbortSignal.timeout(10_000),
+    });
     responseStatus = resp.status;
     responseBody = (await resp.text()).slice(0, 2000);
     if (!resp.ok) error = `HTTP ${resp.status}`;
@@ -153,6 +213,7 @@ export async function createWebhook(input: {
   events: string[];
   description?: string;
 }): Promise<{ id: number; secret: string }> {
+  assertSafeWebhookUrl(input.url);
   const secret = randomHex(32);
   const r = await execute(
     'INSERT INTO `webhooks` (`url`, `events`, `secret`, `description`) VALUES (?, ?, ?, ?)',
@@ -172,6 +233,7 @@ export async function updateWebhook(
   id: number,
   patch: { url?: string; events?: string[]; active?: boolean; description?: string },
 ): Promise<boolean> {
+  if (patch.url !== undefined) assertSafeWebhookUrl(patch.url);
   const sets: string[] = [];
   const params: unknown[] = [];
   if (patch.url !== undefined)         { sets.push('`url` = ?');        params.push(patch.url); }

@@ -19,10 +19,21 @@ import { attachAuthContext } from './auth/middleware.js';
 
 export const app = new Hono();
 
-// Standard headers on every response.
+// Standard + security headers on every response.
 app.use('*', async (c, next) => {
   await next();
   c.header('X-Skelpo-Version', '0.1.0-pre');
+  // Baseline hardening: stop MIME sniffing (also protects served media),
+  // deny framing (clickjacking), and trim the Referer. HSTS is only emitted
+  // when the original request was HTTPS (honoring X-Forwarded-Proto).
+  c.header('X-Content-Type-Options', 'nosniff');
+  c.header('X-Frame-Options', 'SAMEORIGIN');
+  c.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+  const proto = c.req.header('x-forwarded-proto')?.split(',')[0]?.trim().toLowerCase()
+    ?? (c.req.url.startsWith('https://') ? 'https' : 'http');
+  if (proto === 'https') {
+    c.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
 });
 
 // Resolve auth (cookie or bearer) for every request. Routes opt-in to

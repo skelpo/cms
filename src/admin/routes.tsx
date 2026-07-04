@@ -6,7 +6,7 @@ import { setCookie, deleteCookie, getCookie } from 'hono/cookie';
 import type { Context } from 'hono';
 import { AdminPage, StatusBadge } from './layout.js';
 import { adminStatic } from './static.js';
-import { verifyPassword } from '../auth/password.js';
+import { verifyPassword, verifyDummy } from '../auth/password.js';
 import { createSession, deleteSession } from '../auth/sessions.js';
 import {
   checkLoginRateLimit,
@@ -28,7 +28,7 @@ import {
 import { invalidate } from '../cache/deps.js';
 import { fireEvent } from '../webhooks/dispatch.js';
 import { jobStats } from '../jobs/queue.js';
-import { clientIp, userAgent } from '../routes/api/_helpers.js';
+import { clientIp, userAgent, isHttps } from '../routes/api/_helpers.js';
 import { ContentForm, parseContentForm } from './contentEditor.js';
 import { adminScreens } from './screens.js';
 import { can } from '../permissions/check.js';
@@ -56,6 +56,14 @@ function gate(c: Context): AuthContext | Response {
   const auth = c.get('auth');
   if (!auth) return c.redirect('/admin/login', 302);
   return auth;
+}
+
+// Perry workaround: `x instanceof Response` is always false for the native
+// fetch handle (no prototype/constructor link), so gate()'s union can't be
+// discriminated by instanceof. Use a field only AuthContext carries. This is a
+// type guard, so callers still narrow to AuthContext. Identical on Node/Bun.
+function notAuth(x: AuthContext | Response): x is Response {
+  return (x as AuthContext).user === undefined;
 }
 
 // ── Login ──────────────────────────────────────────────────────────────
@@ -102,14 +110,25 @@ adminRoutes.post('/login', async (c) => {
     return c.redirect('/admin/login?err=' + encodeURIComponent(t('auth.tooManyAttempts')), 302);
   }
   const user = await findUserByEmail(email);
-  if (!user || !(await verifyPassword(password, user.passwordHash))) {
+  if (!user) {
+    await verifyDummy(); // equalize timing vs the real compare path (anti-enumeration)
     await recordLoginAttempt(email, ip, false);
     return c.redirect('/admin/login?err=' + encodeURIComponent(t('auth.invalidCredentials')), 302);
+  }
+  if (!(await verifyPassword(password, user.passwordHash))) {
+    await recordLoginAttempt(email, ip, false);
+    return c.redirect('/admin/login?err=' + encodeURIComponent(t('auth.invalidCredentials')), 302);
+  }
+  // Fail CLOSED for TOTP-enabled accounts until real verification ships — the
+  // admin path must not issue a session on password alone. (Matches the API.)
+  if (user.totpVerified === 1) {
+    await recordLoginAttempt(email, ip, false);
+    return c.redirect('/admin/login?err=' + encodeURIComponent('Two-factor authentication is enabled for this account, but verification is not yet available. Contact an administrator.'), 302);
   }
   const { token, expiresAt } = await createSession(user.id, { ip, userAgent: userAgent(c) });
   setCookie(c, SESSION_COOKIE, token, {
     httpOnly: true,
-    secure: c.req.url.startsWith('https://'),
+    secure: isHttps(c),
     sameSite: 'Lax',
     path: '/',
     expires: expiresAt,
@@ -134,7 +153,7 @@ adminRoutes.get('/logout', async (c) => {
 function rememberLocale(c: Context, userId: number, locale: string): Promise<unknown> {
   setCookie(c, ADMIN_LANG_COOKIE, locale, {
     httpOnly: true,
-    secure: c.req.url.startsWith('https://'),
+    secure: isHttps(c),
     sameSite: 'Lax',
     path: '/',
     maxAge: 60 * 60 * 24 * 365,
@@ -149,7 +168,7 @@ function safeAdminReturn(ret: string): string {
 
 adminRoutes.get('/profile', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   const current = coerceLocale(auth.user.locale) ?? t.locale;
   const flash = c.req.query('ok');
@@ -184,7 +203,7 @@ adminRoutes.get('/profile', async (c) => {
 
 adminRoutes.post('/profile', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const body = await c.req.parseBody();
   const locale = coerceLocale(String(body.locale ?? ''));
   if (locale) await rememberLocale(c, auth.user.id, locale);
@@ -197,7 +216,7 @@ adminRoutes.post('/profile', async (c) => {
 // the user was on.
 adminRoutes.post('/profile/language', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const body = await c.req.parseBody();
   const locale = coerceLocale(String(body.locale ?? ''));
   if (locale) await rememberLocale(c, auth.user.id, locale);
@@ -208,7 +227,7 @@ adminRoutes.post('/profile/language', async (c) => {
 
 adminRoutes.get('/', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   const canManageSettings = can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageSettings');
 
@@ -341,7 +360,7 @@ import { setSetting, invalidateSettingsCache } from '../settings/store.js';
 
 adminRoutes.post('/maintenance/toggle', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageSettings')) {
     return c.redirect('/admin?ok=' + encodeURIComponent(t('dashboard.flashPermDenied')), 302);
@@ -360,7 +379,7 @@ adminRoutes.post('/maintenance/toggle', async (c) => {
 
 adminRoutes.post('/maintenance/rotate-token', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageSettings')) {
     return c.redirect('/admin', 302);
@@ -380,7 +399,7 @@ adminRoutes.post('/maintenance/rotate-token', async (c) => {
 
 adminRoutes.get('/types', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   const types = await listTypes();
   // Per-type row counts (any locale)
@@ -432,12 +451,17 @@ adminRoutes.get('/types', async (c) => {
 
 adminRoutes.get('/content/:type', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   const typeSlug = c.req.param('type');
   const types = await listTypes();
   const ct = types.find((x) => x.slug === typeSlug);
   if (!ct) return c.html(<AdminPage title={t('common.notFound')} t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('common.unknownType')}</AdminPage>, 404);
+
+  const ctx = { userId: auth.user.id, caps: auth.role.capabilities };
+  if (!can(ctx, 'read', ct.slug)) {
+    return c.html(<AdminPage title={t('common.forbidden')} t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('common.forbidden')}</AdminPage>, 403);
+  }
 
   // Locale filter — defaults to en. "all" shows every locale (useful for
   // diffing translation coverage). Available locales come from site.locales.
@@ -453,14 +477,21 @@ adminRoutes.get('/content/:type', async (c) => {
     }
   } catch { /* default to en */ }
 
-  const { rows } = await listContent({
+  const canDrafts = can(ctx, 'readDrafts', ct.slug);
+  const canOthers = can(ctx, 'readOthersDrafts', ct.slug);
+  const { rows: allRows } = await listContent({
     typeSlug,
     locale: sel === 'all' ? undefined : sel,
-    status: ['draft', 'review', 'published', 'archived'],
-    includeDrafts: true,
+    status: canDrafts ? ['draft', 'review', 'published', 'archived'] : ['published'],
+    includeDrafts: canDrafts,
     limit: 200,
     sort: '-updatedAt',
   });
+  // Without readOthersDrafts, hide other people's unpublished rows (keep every
+  // published row + the caller's own drafts).
+  const rows = (canDrafts && !canOthers)
+    ? allRows.filter((r) => r.status === 'published' || r.authorId === auth.user.id)
+    : allRows;
 
   const rowsLabel = t.plural('common.rows', rows.length);
   return c.html(
@@ -547,7 +578,7 @@ async function readSiteLocales(): Promise<string[]> {
 
 adminRoutes.get('/content/:type/new', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   const ct = await getTypeBySlug(c.req.param('type'));
   if (!ct) return c.html(<AdminPage title="404" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('common.unknownType')}</AdminPage>, 404);
@@ -602,12 +633,24 @@ adminRoutes.get('/content/:type/new', async (c) => {
 
 adminRoutes.get('/content/:type/:id{[0-9]+}', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   const ct = await getTypeBySlug(c.req.param('type'));
   if (!ct) return c.html(<AdminPage title="404" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('common.unknownType')}</AdminPage>, 404);
   const row = await findById(Number(c.req.param('id')), true);
   if (!row) return c.html(<AdminPage title="404" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('common.notFound')}</AdminPage>, 404);
+  const ctx = { userId: auth.user.id, caps: auth.role.capabilities };
+  if (!can(ctx, 'read', ct.slug)) {
+    return c.html(<AdminPage title={t('common.forbidden')} t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('common.forbidden')}</AdminPage>, 403);
+  }
+  if (row.status !== 'published') {
+    const allowed = row.authorId === auth.user.id
+      ? can(ctx, 'readDrafts', ct.slug)
+      : can(ctx, 'readOthersDrafts', ct.slug);
+    if (!allowed) {
+      return c.html(<AdminPage title={t('common.forbidden')} t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('common.forbidden')}</AdminPage>, 403);
+    }
+  }
   const fields = typeof row.fields === 'string' ? JSON.parse(row.fields) : row.fields;
   const seo = typeof row.seo === 'string' ? JSON.parse(row.seo) : row.seo;
   const flash = c.req.query('ok')
@@ -650,7 +693,7 @@ function invalidateAndNotify(event: Parameters<typeof fireEvent>[0], typeSlug: s
 
 adminRoutes.post('/content/:type', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   const ct = await getTypeBySlug(c.req.param('type'));
   if (!ct) return c.html(<AdminPage title="404" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('common.unknownType')}</AdminPage>, 404);
@@ -697,7 +740,7 @@ adminRoutes.post('/content/:type', async (c) => {
 
 adminRoutes.post('/content/:type/:id{[0-9]+}', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   const ct = await getTypeBySlug(c.req.param('type'));
   const id = Number(c.req.param('id'));

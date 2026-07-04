@@ -27,6 +27,12 @@ function gate(c: Context): AuthContext | Response {
   if (!auth) return c.redirect('/admin/login', 302);
   return auth;
 }
+// Perry workaround: `instanceof Response` is always false for native fetch
+// handles, so discriminate gate()'s union by a field only AuthContext carries.
+// Type guard → callers still narrow to AuthContext. Identical on Node/Bun.
+function notAuth(x: AuthContext | Response): x is Response {
+  return (x as AuthContext).user === undefined;
+}
 function need(c: Context, auth: AuthContext, cap: Parameters<typeof can>[1]): boolean {
   return can({ userId: auth.user.id, caps: auth.role.capabilities }, cap);
 }
@@ -63,7 +69,7 @@ function countLeaves(o: unknown): number {
 
 adminScreens.get('/settings', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   const all = await getAllSettings();
   const flash = c.req.query('ok');
@@ -154,7 +160,7 @@ function shapeOf(v: unknown): 'string' | 'multiline' | 'number' | 'boolean' | 't
 
 adminScreens.get('/settings/:keyName', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   const keyName = decodeURIComponent(c.req.param('keyName'));
   const all = await getAllSettings();
@@ -281,7 +287,7 @@ const TreeEditor: FC<{ value: Record<string, unknown>; t: Translator }> = ({ val
 
 adminScreens.post('/settings/:keyName', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   if (!need(c, auth, 'manageSettings')) {
     return c.redirect('/admin/settings?ok=' + encodeURIComponent(t('common.forbidden')), 302);
@@ -348,7 +354,7 @@ adminScreens.post('/settings/:keyName', async (c) => {
   await setSetting(keyName, newValue, auth.user.id);
   invalidate([`setting:${keyName}`]);
   invalidateSettingsCache();
-  invalidate(['GET:/settings'], { prefix: true });
+  invalidate(['settings:all']);
   return c.redirect(`/admin/settings/${encodeURIComponent(keyName)}?ok=${encodeURIComponent(t('content.flashSaved'))}`, 302);
 });
 
@@ -389,7 +395,7 @@ const MEDIA_CSS = `
 
 adminScreens.get('/media', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   const filter = c.req.query('type') ?? '';
   const items = await listMedia({ ...(filter ? { mimeType: filter } : {}), limit: 200 });
@@ -502,7 +508,7 @@ adminScreens.get('/media', async (c) => {
 // Detail / edit modal for a single media row.
 adminScreens.get('/media/:id{[0-9]+}', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   const m = await getMedia(Number(c.req.param('id')));
   if (!m) return c.html(<AdminPage title={t('common.notFound')} t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('media.notFound')}</AdminPage>, 404);
@@ -551,7 +557,7 @@ adminScreens.get('/media/:id{[0-9]+}', async (c) => {
 
 adminScreens.post('/media/:id{[0-9]+}', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   if (!need(c, auth, 'manageMedia')) return c.redirect('/admin/media', 302);
   const id = Number(c.req.param('id'));
   const body = await c.req.parseBody();
@@ -569,11 +575,12 @@ adminScreens.post('/media/:id{[0-9]+}', async (c) => {
 // Multipart upload from the admin (browser-side drag-drop or picker).
 adminScreens.post('/media/upload', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   if (!need(c, auth, 'manageMedia')) return c.json({ error: 'forbidden' }, 403);
   const body = await c.req.parseBody();
   const file = body.file;
   if (!file || typeof file === 'string') return c.json({ error: 'file required' }, 422);
+  if (file.size > 25 * 1024 * 1024) return c.json({ error: 'file exceeds 25MB limit' }, 413);
   let altText: Record<string, string> = {};
   try { altText = body.altText ? JSON.parse(String(body.altText)) : {}; }
   catch { altText = { en: String(body.altText ?? '') }; }
@@ -596,7 +603,7 @@ adminScreens.post('/media/upload', async (c) => {
 // a grid (no chrome) so it can be loaded via fetch + innerHTML.
 adminScreens.get('/media/picker', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   const items = await listMedia({ mimeType: 'image/', limit: 200 });
   // Returns a fragment, not a full page. CSS comes from the parent.
@@ -644,7 +651,7 @@ adminScreens.get('/media/picker', async (c) => {
 
 adminScreens.get('/forms', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   const canManageForms = need(c, auth, 'manageForms');
   const canViewSubs    = canManageForms || need(c, auth, 'viewSubmissions');
@@ -755,8 +762,12 @@ adminScreens.get('/forms', async (c) => {
 
 adminScreens.get('/forms/:slug', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
+  // Submissions carry PII (names, emails, IPs) — same gate as the /forms index.
+  if (!need(c, auth, 'viewSubmissions') && !need(c, auth, 'manageForms')) {
+    return c.html(<AdminPage title={t('common.forbidden')} t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('common.forbidden')}</AdminPage>, 403);
+  }
   const slug = c.req.param('slug');
   const includeSpam = c.req.query('spam') === '1';
 
@@ -850,7 +861,7 @@ adminScreens.get('/forms/:slug', async (c) => {
 
 adminScreens.post('/forms/:slug/submissions/:id{[0-9]+}', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   if (!need(c, auth, 'manageForms')) return c.redirect(`/admin/forms/${c.req.param('slug')}`, 302);
   const slug = c.req.param('slug');
   const id = Number(c.req.param('id'));
@@ -867,7 +878,7 @@ adminScreens.post('/forms/:slug/submissions/:id{[0-9]+}', async (c) => {
 
 adminScreens.get('/users', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   const users = await query<{
     id: number; email: string; displayName: string; status: string; roleSlug: string; lastLoginAt: unknown;
@@ -952,7 +963,7 @@ adminScreens.get('/users', async (c) => {
 
 adminScreens.post('/users', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   if (!need(c, auth, 'manageUsers')) return c.redirect('/admin/users?ok=' + encodeURIComponent(t('users.flashForbidden')), 302);
   const b = await c.req.parseBody();
@@ -980,7 +991,7 @@ adminScreens.post('/users', async (c) => {
 
 adminScreens.post('/users/:id/toggle', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   if (!need(c, auth, 'manageUsers')) return c.redirect('/admin/users?ok=' + encodeURIComponent(t('users.flashForbidden')), 302);
   const id = Number(c.req.param('id'));
@@ -997,7 +1008,7 @@ adminScreens.post('/users/:id/toggle', async (c) => {
 
 adminScreens.get('/redirects', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   const rows = await query<{ id: number; source: string; destination: string; statusCode: number; hitCount: number }>(
     'SELECT `id`,`source`,`destination`,`statusCode`,`hitCount` FROM `redirects` ORDER BY `id` DESC',
@@ -1067,7 +1078,7 @@ adminScreens.get('/redirects', async (c) => {
 
 adminScreens.post('/redirects', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   if (!need(c, auth, 'manageRedirects')) return c.redirect('/admin/redirects', 302);
   const b = await c.req.parseBody();
   const source = String(b.source ?? '').trim();
@@ -1086,7 +1097,7 @@ adminScreens.post('/redirects', async (c) => {
 
 adminScreens.post('/redirects/:id/delete', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   if (!need(c, auth, 'manageRedirects')) return c.redirect('/admin/redirects', 302);
   await execute('DELETE FROM `redirects` WHERE `id`=?', [Number(c.req.param('id'))]);
   invalidate(['redirects', 'GET:/redirects'], { prefix: true });
@@ -1097,7 +1108,7 @@ adminScreens.post('/redirects/:id/delete', async (c) => {
 
 adminScreens.get('/menus', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   const menus = await listMenus();
   const sel = c.req.query('m') ?? menus[0]?.slug ?? 'main';
@@ -1169,7 +1180,7 @@ adminScreens.get('/menus', async (c) => {
 
 adminScreens.post('/menus/:slug/items', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   if (!need(c, auth, 'manageMenus')) return c.redirect('/admin/menus', 302);
   const slug = c.req.param('slug');
   const b = await c.req.parseBody();
@@ -1184,7 +1195,7 @@ adminScreens.post('/menus/:slug/items', async (c) => {
 
 adminScreens.post('/menus/:slug/items/:id/delete', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   if (!need(c, auth, 'manageMenus')) return c.redirect('/admin/menus', 302);
   const slug = c.req.param('slug');
   await deleteMenuItem(Number(c.req.param('id')));
@@ -1196,7 +1207,7 @@ adminScreens.post('/menus/:slug/items/:id/delete', async (c) => {
 
 adminScreens.get('/jobs', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const stats = await jobStats();
   const recent = await query<{ id: number; kind: string; status: string; attempts: number; lastError: string | null; createdAt: unknown }>(
     'SELECT `id`,`kind`,`status`,`attempts`,`lastError`,`createdAt` FROM `jobs` ORDER BY `id` DESC LIMIT 30',
@@ -1252,7 +1263,7 @@ adminScreens.get('/jobs', async (c) => {
 
 adminScreens.post('/jobs/:id/retry', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   if (!need(c, auth, 'manageJobs')) return c.redirect('/admin/jobs', 302);
   await retryJob(Number(c.req.param('id')));
   return c.redirect('/admin/jobs', 302);
@@ -1262,7 +1273,7 @@ adminScreens.post('/jobs/:id/retry', async (c) => {
 
 adminScreens.get('/webhooks', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   const hooks = await listWebhooks();
   const flash = c.req.query('ok');
@@ -1324,7 +1335,7 @@ adminScreens.get('/webhooks', async (c) => {
 
 adminScreens.post('/webhooks', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   if (!need(c, auth, 'manageSettings')) return c.redirect('/admin/webhooks?ok=' + encodeURIComponent(t('webhooks.flashForbidden')), 302);
   const b = await c.req.parseBody();
@@ -1342,7 +1353,7 @@ adminScreens.post('/webhooks', async (c) => {
 
 adminScreens.post('/webhooks/:id/delete', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (notAuth(auth)) return auth;
   const t = getT(c);
   if (!need(c, auth, 'manageSettings')) return c.redirect('/admin/webhooks', 302);
   await deleteWebhook(Number(c.req.param('id')));

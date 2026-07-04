@@ -11,7 +11,7 @@ import {
 import { query } from '../../db/client.js';
 import { normalizeDates } from '../../db/datetime.js';
 import { errorResponse } from './_helpers.js';
-import { requireAuth } from '../../auth/middleware.js';
+import { requireAuth, isResponse } from '../../auth/middleware.js';
 import { can } from '../../permissions/check.js';
 
 export const typeRoutes = new Hono();
@@ -29,7 +29,7 @@ typeRoutes.get('/:slug', async (c) => {
 
 typeRoutes.get('/:slug/revisions', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   const t = await getTypeBySlug(c.req.param('slug'));
   if (!t) return errorResponse(c, 'notFound', 'Type not found', 404);
   const revs = await query(
@@ -42,7 +42,7 @@ typeRoutes.get('/:slug/revisions', async (c) => {
 
 typeRoutes.post('/', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageTypes')) {
     return errorResponse(c, 'forbidden', 'manageTypes capability required', 403);
   }
@@ -71,7 +71,7 @@ typeRoutes.post('/', async (c) => {
 
 typeRoutes.patch('/:slug', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageTypes')) {
     return errorResponse(c, 'forbidden', 'manageTypes capability required', 403);
   }
@@ -88,7 +88,11 @@ typeRoutes.patch('/:slug', async (c) => {
     auth.user.id,
     { dryRun },
   );
-  if (!result.ok) return errorResponse(c, 'notFound', result.error, 404);
+  if (!result.ok) {
+    const status = (result.status ?? 404) as 404 | 409 | 422;
+    const code = status === 422 ? 'validationError' : status === 409 ? 'conflict' : 'notFound';
+    return errorResponse(c, code, result.error, status);
+  }
   return c.json({
     data: {
       dryRun,
@@ -100,7 +104,7 @@ typeRoutes.patch('/:slug', async (c) => {
 
 typeRoutes.delete('/:slug', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageTypes')) {
     return errorResponse(c, 'forbidden', 'manageTypes capability required', 403);
   }
