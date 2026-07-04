@@ -148,19 +148,74 @@ implementing the interface — every byte path already routes through it.
 
 ## Perry-native facts
 
-- **`Bun.serve` is not implemented in Perry** as of Perry 0.5.1019. A
-  `Bun` sentinel object exists but `Bun.serve` is `undefined`, and it's
-  not on `globalThis`. The CMS server's Bun-detect fallback path
-  therefore does NOT yet boot natively — verify before claiming it does.
-- For a Perry-native HTTP server today, use **Fastify** (Perry has a
-  native Rust impl in `perry-stdlib`) — it compiles and runs cleanly.
-  `node:http.createServer` compiles but the response body/headers don't
-  propagate (returns `content-length: 0`); don't rely on it.
-- `@skelpo/cms-client` and `@skelpo/site-kit` **lack a `"perry":
-  "./src/index.ts"` exports entry** (and don't ship `src/`), so the
-  customer site can't cross-compile against them yet. `@perryts/mysql`
-  is the reference for the right shape (`perry` export + `src/` in
-  `files`). Adding this is the open blocker for compiling perry.land.
+Status on **Perry 0.5.1039**: the CMS **compiles to a native binary and
+boots** — migrate, seed, job worker, MySQL, and the HTTP listener bind are
+all native and verified. **HTTP request handling does NOT yet work**: every
+request throws `Symbol()` inside `app.fetch` and returns 500 (see the open
+runtime bugs below). So "compiles + boots + listens" ✅, "serves real
+responses" ❌ — not production-usable on Perry yet.
+
+Build it with **`npm run build:perry`** (do not call `perry` directly — see
+the invocation pitfall below). The old CLI subcommand was `perry build`;
+it's now **`perry compile`**.
+
+- **JS-only deps must be AOT-compiled (V8 runtime was removed).** Perry
+  can no longer evaluate JS at runtime, so any npm dep shipped as compiled
+  JS must be listed in **`perry.compilePackages`** (and
+  `perry.allow.compilePackages`) in `package.json`. We do this for
+  `hono` and `bcryptjs`. Without it: "JavaScript runtime (V8) support has
+  been removed."
+- **Invoke perry from its REAL path, not the `~/.cargo/bin/perry`
+  symlink.** The compiler finds its workspace (and the on-demand
+  "auto-optimize" step that builds + links the per-feature ext libs,
+  incl. the node:http server lib `libperry_ext_http.a`) by walking up
+  from `current_exe()` for `crates/perry-runtime`. Through the symlink
+  that resolves to `~/.cargo/bin` → workspace not found → only
+  `libperry_runtime.a` + `libperry_stdlib.a` get linked → node:http
+  server symbols are unresolved → the binary dies at the HTTP bind with
+  `TypeError: value is not a function`. **`PERRY_RUNTIME_DIR` does NOT
+  fix this.** `scripts/build-perry.sh` resolves the symlink for us.
+- **node:http server partially works.** `createServer`/`server.listen`/
+  `res.end`/`res.write` (sync + async) and the listener bind all work
+  natively. `IncomingMessage`: `req.method`/`req.url` work, **`req.on('data')`/
+  `req.on('end')` fire** (attach them **synchronously** in the createServer
+  callback — Perry fires them eagerly, so a deferred/`await`-ed registration
+  misses them and hangs). The old "body/headers don't propagate" note is
+  obsolete for the basics.
+- **OPEN Perry runtime bugs blocking serve** (file/track upstream; all
+  reproduced on 0.5.1039 in an isolated worktree build):
+  1. **`req.headers` is `undefined`** on `IncomingMessage`. Workaround:
+     read **`req.rawHeaders`** (flat `[k,v,k,v,…]`, populated correctly)
+     and rebuild a `Headers`. `rawHeaders` is portable to Node too.
+  2. **request body chunks arrive as `string`, not `Buffer`** — so
+     `Buffer.concat(chunks)` throws "list[0] … must be Buffer/Uint8Array".
+     Coerce each chunk (`Buffer.from(chunk)`) before concat.
+  3. **THE blocker: `app.fetch` throws a bare `Symbol()` on every request**
+     (even header-less `GET /healthz`, a pure `c.json`), so all routes 500.
+     A trivial 1-route Hono app served through the *same* inline adapter
+     works (200), and `c.json`/`c.text`/`getCookie`/`c.req.header` all work
+     in isolation — so the trigger is somewhere in the CMS's full
+     middleware/route graph under compilation, not yet isolated. This is
+     the thing to chase next.
+- **Do NOT use `@hono/node-server`** under Perry. Its `serve()` now *binds*
+  (Perry #2533 fixed), but its request path throws and then crashes inside
+  its own catch handler (`e.name` on an undefined caught value). `server.ts`
+  should serve via an inline `node:http` adapter bridging
+  `(req,res)` ⇄ `app.fetch` instead — but note that adapter is **not yet
+  working end-to-end** because of bug 3 above. `@hono/node-server` is no
+  longer in `perry.compilePackages`.
+- **No `foo!++`** — a non-null assertion on an update expression trips
+  `U006` ("Update expression only supports identifiers and member
+  expressions"). Drop the `!` (or use `+= 1`).
+- **`Bun.serve` is still unimplemented** (a `Bun` sentinel exists, but
+  `Bun.serve` is `undefined` and not on `globalThis`) — the intended
+  Perry path is node:http, not Bun.
+- `@skelpo/cms-client` / `@skelpo/site-kit` still **lack a `"perry"`
+  exports entry** and don't ship `src/`. With `compilePackages` a
+  consumer can now compile their published JS directly, so this is no
+  longer a hard blocker — but cross-compiling the customer site against
+  them this way is **unverified**. `@perryts/mysql` remains the
+  reference shape (`perry` export + `src/` in `files`).
 
 ## Customer site (separate repo)
 
@@ -168,10 +223,11 @@ perry.land's Perry-native rewrite lives at `~/projects/perry-landing-skelpo`
 → pushed to `PerryTS/perryts.com` branch **`perry-native`**. Hono + JSX
 + Tailwind v4, depends on the two `@skelpo/*` packages from npm.
 Deployed at **beta.perryts.com** via `deploy.sh`: cross-compile on a
-Linux worker (`root@84.32.98.120`, Perry 0.5.1018) → relay binary →
+Linux worker (`root@builder.perryts.com`, Perry 0.5.1018) → relay binary →
 `root@webserver.skelpo.net` → pm2/nginx. Currently runs the
-`--node-fallback` (tsx) path because the Perry compile is blocked on
-the missing `perry:` exports above.
+`--node-fallback` (tsx) path; a native Perry compile of the customer
+site hasn't been re-attempted since the CMS-side findings above
+(`compilePackages` + real-binary invocation + inline node:http adapter).
 
 ## Benchmarks
 

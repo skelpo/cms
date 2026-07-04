@@ -14,7 +14,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "build:perry": "perry build src/server.ts -o dist/skelpo-cms",
+    "build:perry": "bash scripts/build-perry.sh",
     "start": "node dist/server.js",
     "start:bun": "bun src/server.ts",
     "start:perry": "./dist/skelpo-cms",
@@ -23,13 +23,12 @@
     "migrate": "tsx src/cli/main.ts migrate",
     "test": "npm run test:unit && npm run test:integration",
     "test:unit": "SESSION_SECRET=unit_test_secret_unit_test_secret_unit_test_secret_unit node --import tsx --test 'tests/unit/*.test.ts'",
-    "test:integration": "ls tests/integration/*.test.ts >/dev/null 2>&1 && node --import tsx --test --test-concurrency=1 'tests/integration/*.test.ts' || echo 'no integration tests (set up a test DB + add tests/integration/*.test.ts)'"
+    "test:integration": "if ls tests/integration/*.test.ts >/dev/null 2>&1; then node --import tsx --test --test-concurrency=1 'tests/integration/*.test.ts'; else echo 'no integration tests (set up a test DB + add tests/integration/*.test.ts)'; fi"
   },
   "dependencies": {
-    "@hono/node-server": "^1.13.0",
     "@perryts/mysql": "^0.1.4",
     "bcryptjs": "^3.0.2",
-    "hono": "^4.10.0"
+    "hono": "^4.12.25"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
@@ -59,5 +58,17 @@
   ],
   "workspaces": [
     "packages/*"
-  ]
+  ],
+  "perry": {
+    "compilePackages": [
+      "hono",
+      "bcryptjs"
+    ],
+    "allow": {
+      "compilePackages": [
+        "hono",
+        "bcryptjs"
+      ]
+    }
+  }
 }
