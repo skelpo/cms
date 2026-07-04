@@ -30,3 +30,17 @@ export async function verifyPassword(plain: string, hash: string): Promise<boole
     return false;
   }
 }
+
+// A fixed bcrypt hash (computed once at boot) used to equalize login timing on
+// the unknown-user path: without it, a missing account returns immediately
+// while a real account pays for a bcrypt.compare — a timing oracle for user
+// enumeration. Callers run verifyDummy() when the email doesn't resolve.
+const DUMMY_HASH = bcrypt.hashSync('skelpo-dummy-verify-target', COST);
+
+export async function verifyDummy(): Promise<void> {
+  try {
+    await bcrypt.compare('skelpo-dummy-verify-probe', DUMMY_HASH);
+  } catch {
+    /* timing equalization only — result is discarded */
+  }
+}

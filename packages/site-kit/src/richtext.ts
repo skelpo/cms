@@ -2,6 +2,8 @@
 // node/mark set the CMS allows (no raw HTML). Unknown nodes render their
 // children so forward-compat additions degrade gracefully.
 
+import { safeHref, safeSrc } from './url.js';
+
 interface TipTapMark {
   type: string;
   attrs?: Record<string, unknown>;
@@ -35,7 +37,7 @@ function applyMarks(text: string, marks: TipTapMark[] = []): string {
       case 'strike': out = `<s>${out}</s>`; break;
       case 'underline': out = `<u>${out}</u>`; break;
       case 'link': {
-        const href = String(m.attrs?.href ?? '#');
+        const href = safeHref(String(m.attrs?.href ?? '#'));
         const tgt = m.attrs?.target ? ` target="${attrEsc(String(m.attrs.target))}" rel="noopener"` : '';
         out = `<a href="${attrEsc(href)}"${tgt}>${out}</a>`;
         break;
@@ -75,7 +77,7 @@ function renderNode(node: TipTapNode): string {
     case 'horizontalRule':
       return '<hr>';
     case 'image': {
-      const src = attrEsc(String(node.attrs?.src ?? ''));
+      const src = attrEsc(safeSrc(String(node.attrs?.src ?? '')));
       const alt = attrEsc(String(node.attrs?.alt ?? ''));
       return `<img src="${src}" alt="${alt}" loading="lazy">`;
     }

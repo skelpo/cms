@@ -2,7 +2,7 @@
 
 import { Hono } from 'hono';
 import { setCookie, deleteCookie } from 'hono/cookie';
-import { verifyPassword } from '../../auth/password.js';
+import { verifyPassword, verifyDummy } from '../../auth/password.js';
 import {
   createSession,
   deleteSession,
@@ -18,13 +18,13 @@ import {
   touchLastLogin,
   toPublicUser,
 } from '../../auth/users.js';
-import { requireAuth } from '../../auth/middleware.js';
+import { requireAuth, isResponse } from '../../auth/middleware.js';
 import {
   createToken,
   listTokensForUser,
   revokeToken,
 } from '../../auth/tokens.js';
-import { errorResponse, clientIp, userAgent } from './_helpers.js';
+import { errorResponse, clientIp, userAgent, isHttps } from './_helpers.js';
 
 const SESSION_COOKIE = 'skelpoSession';
 
@@ -64,7 +64,9 @@ authRoutes.post('/login', async (c) => {
   // 2. Lookup user.
   const user = await findUserByEmail(email);
   if (!user) {
-    // Still record the failure to slow enumeration probes.
+    // Equalize timing with the real bcrypt.compare path so a missing account
+    // isn't detectably faster (user enumeration), then record the failure.
+    await verifyDummy();
     await recordLoginAttempt(email, ip, false);
     return errorResponse(c, 'unauthorized', 'Invalid credentials', 401);
   }
@@ -76,19 +78,19 @@ authRoutes.post('/login', async (c) => {
     return errorResponse(c, 'unauthorized', 'Invalid credentials', 401);
   }
 
-  // 4. TOTP check if enabled.
+  // 4. TOTP check if enabled. Real verification (src/auth/totp.ts) is NOT yet
+  // implemented, so we FAIL CLOSED: an account with TOTP enabled cannot obtain
+  // a session until the code can actually be validated against the stored
+  // secret. (Previously this accepted ANY 6-digit value — a complete 2FA
+  // bypass.) No enrollment path currently sets totpVerified=1, so no working
+  // account is affected today.
   if (user.totpVerified === 1) {
-    if (!body.totpCode) {
-      return errorResponse(c, 'validationError', 'TOTP code required', 422, {
-        field: 'totpCode',
-        constraint: 'totpRequired',
-      });
-    }
-    // TODO: validate TOTP code via /src/auth/totp.ts (next iteration).
-    // For now, accept any 6-digit value while TOTP module is being built.
-    if (!/^\d{6}$/.test(body.totpCode)) {
-      return errorResponse(c, 'validationError', 'Invalid TOTP code', 422);
-    }
+    return errorResponse(
+      c,
+      'unavailable',
+      'Two-factor authentication is enabled for this account, but verification is not yet available. Contact an administrator.',
+      503,
+    );
   }
 
   // 5. Issue session.
@@ -98,7 +100,7 @@ authRoutes.post('/login', async (c) => {
   });
   setCookie(c, SESSION_COOKIE, token, {
     httpOnly: true,
-    secure: c.req.header('x-forwarded-proto') === 'https' || c.req.url.startsWith('https://'),
+    secure: isHttps(c),
     sameSite: 'Lax',
     path: '/',
     expires: expiresAt,
@@ -142,7 +144,7 @@ authRoutes.post('/logout', async (c) => {
 
 authRoutes.get('/me', (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
 
   return c.json({
     data: {
@@ -157,7 +159,7 @@ authRoutes.get('/me', (c) => {
 
 authRoutes.post('/refresh', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (auth.via !== 'session') {
     return errorResponse(c, 'forbidden', 'Refresh only applies to sessions', 403);
   }
@@ -169,7 +171,7 @@ authRoutes.post('/refresh', async (c) => {
   });
   setCookie(c, SESSION_COOKIE, token, {
     httpOnly: true,
-    secure: c.req.url.startsWith('https://'),
+    secure: isHttps(c),
     sameSite: 'Lax',
     path: '/',
     expires: expiresAt,
@@ -187,7 +189,7 @@ authRoutes.post('/refresh', async (c) => {
 
 authRoutes.post('/tokens', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
 
   const body = (await c.req.json<{ name?: string; scopes?: string[] }>().catch(
     () => ({}) as { name?: string; scopes?: string[] },
@@ -215,7 +217,7 @@ authRoutes.post('/tokens', async (c) => {
 
 authRoutes.get('/tokens', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   const tokens = await listTokensForUser(auth.user.id);
   // Never return tokenHash; only id, name, prefix, scopes, timestamps.
   return c.json({
@@ -236,7 +238,7 @@ authRoutes.get('/tokens', async (c) => {
 
 authRoutes.delete('/tokens/:id', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   const id = Number(c.req.param('id'));
   if (!Number.isFinite(id) || id <= 0) {
     return errorResponse(c, 'badRequest', 'Invalid token id', 400);

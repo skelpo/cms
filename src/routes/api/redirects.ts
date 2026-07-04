@@ -7,7 +7,7 @@ import { normalizeDates } from '../../db/datetime.js';
 import { invalidate } from '../../cache/deps.js';
 import { withCache } from '../../cache/respond.js';
 import { errorResponse } from './_helpers.js';
-import { requireAuth } from '../../auth/middleware.js';
+import { requireAuth, isResponse } from '../../auth/middleware.js';
 import { can } from '../../permissions/check.js';
 
 export const redirectRoutes = new Hono();
@@ -18,6 +18,16 @@ interface RedirectRow {
 }
 
 const VALID_CODES = new Set([301, 302, 307, 308]);
+
+// A destination must be a root-relative path or an absolute http(s) URL — never
+// `javascript:`/`data:` or protocol-relative `//host`, which the consuming
+// frontend would turn into an open redirect or XSS.
+function isSafeRedirectDestination(dest: string): boolean {
+  const s = dest.trim();
+  if (s.startsWith('//')) return false;
+  if (s.startsWith('/')) return true;
+  return /^https?:\/\//i.test(s);
+}
 
 redirectRoutes.get('/', async (c) => {
   // Public — the customer frontend fetches the full table to resolve
@@ -33,7 +43,7 @@ redirectRoutes.get('/', async (c) => {
 
 redirectRoutes.post('/', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageRedirects')) {
     return errorResponse(c, 'forbidden', 'manageRedirects capability required', 403);
   }
@@ -44,6 +54,9 @@ redirectRoutes.post('/', async (c) => {
   const statusCode = body.statusCode ?? 301;
   if (!source || !destination) {
     return errorResponse(c, 'validationError', 'source and destination required', 422);
+  }
+  if (!isSafeRedirectDestination(destination)) {
+    return errorResponse(c, 'validationError', 'destination must be a root-relative path or an absolute http(s) URL', 422);
   }
   if (!VALID_CODES.has(statusCode)) {
     return errorResponse(c, 'validationError', 'statusCode must be 301/302/307/308', 422);
@@ -60,7 +73,7 @@ redirectRoutes.post('/', async (c) => {
 
 redirectRoutes.patch('/:id', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageRedirects')) {
     return errorResponse(c, 'forbidden', 'manageRedirects capability required', 403);
   }
@@ -70,7 +83,12 @@ redirectRoutes.patch('/:id', async (c) => {
   const sets: string[] = [];
   const params: unknown[] = [];
   if (body.source !== undefined)      { sets.push('`source` = ?');      params.push(body.source); }
-  if (body.destination !== undefined) { sets.push('`destination` = ?'); params.push(body.destination); }
+  if (body.destination !== undefined) {
+    if (!isSafeRedirectDestination(String(body.destination))) {
+      return errorResponse(c, 'validationError', 'destination must be a root-relative path or an absolute http(s) URL', 422);
+    }
+    sets.push('`destination` = ?'); params.push(body.destination);
+  }
   if (body.statusCode !== undefined) {
     if (!VALID_CODES.has(body.statusCode)) return errorResponse(c, 'validationError', 'bad statusCode', 422);
     sets.push('`statusCode` = ?'); params.push(body.statusCode);
@@ -85,7 +103,7 @@ redirectRoutes.patch('/:id', async (c) => {
 
 redirectRoutes.delete('/:id', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageRedirects')) {
     return errorResponse(c, 'forbidden', 'manageRedirects capability required', 403);
   }

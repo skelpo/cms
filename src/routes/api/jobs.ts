@@ -6,14 +6,14 @@ import { jobStats, retryJob } from '../../jobs/queue.js';
 import { query, queryOne } from '../../db/client.js';
 import { normalizeDates } from '../../db/datetime.js';
 import { errorResponse } from './_helpers.js';
-import { requireAuth } from '../../auth/middleware.js';
+import { requireAuth, isResponse } from '../../auth/middleware.js';
 import { can } from '../../permissions/check.js';
 
 export const jobsRoutes = new Hono();
 
 function gate(c: Parameters<typeof requireAuth>[0]) {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageJobs')) {
     return errorResponse(c, 'forbidden', 'manageJobs capability required', 403);
   }
@@ -24,7 +24,7 @@ function gate(c: Parameters<typeof requireAuth>[0]) {
 
 jobsRoutes.get('/', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   const status = c.req.query('status');
   const limit = Math.min(Number(c.req.query('limit') ?? 50), 500);
   const params: unknown[] = [];
@@ -49,7 +49,7 @@ jobsRoutes.get('/', async (c) => {
 
 jobsRoutes.get('/stats', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   const stats = await jobStats();
   return c.json({ data: stats });
 });
@@ -58,7 +58,7 @@ jobsRoutes.get('/stats', async (c) => {
 
 jobsRoutes.get('/:id{[0-9]+}', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   const row = await queryOne<{
     id: number; queue: string; status: string; payload: unknown; runAt: unknown;
     attempts: number; lastError: string | null; createdAt: unknown; updatedAt: unknown;
@@ -71,7 +71,7 @@ jobsRoutes.get('/:id{[0-9]+}', async (c) => {
 
 jobsRoutes.post('/:id{[0-9]+}/retry', async (c) => {
   const auth = gate(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageJobs')) {
     return errorResponse(c, 'forbidden', 'manageJobs capability required', 403);
   }

@@ -26,7 +26,7 @@ import { withCache } from '../../cache/respond.js';
 import { invalidate } from '../../cache/deps.js';
 import { fireEvent } from '../../webhooks/dispatch.js';
 import { errorResponse } from './_helpers.js';
-import { requireAuth } from '../../auth/middleware.js';
+import { requireAuth, isResponse } from '../../auth/middleware.js';
 import { can } from '../../permissions/check.js';
 
 export const contentRoutes = new Hono();
@@ -75,6 +75,11 @@ contentRoutes.get('/', async (c) => {
     if (cursor) opts.cursor = cursor;
     if (authorId !== undefined) opts.authorId = authorId;
     if (slug) opts.slug = slug;
+    // Without readOthersDrafts, a draft listing is scoped to the caller's own
+    // rows (overrides any caller-supplied authorId filter).
+    if (auth && !can({ userId: auth.user.id, caps: auth.role.capabilities }, 'readOthersDrafts', t.slug)) {
+      opts.authorId = auth.user.id;
+    }
     const { rows, nextCursor } = await listContent(opts);
     const data = await Promise.all(
       rows.map((r) => inflateContent(r, { includeRelations, defaultLocale })),
@@ -121,9 +126,11 @@ contentRoutes.get('/by-id/:id', async (c) => {
   // If draft, require capability.
   if (row.status !== 'published') {
     if (!auth) return errorResponse(c, 'unauthorized', 'Authentication required', 401);
-    if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'readDrafts', row.typeSlug, row.authorId)) {
-      return errorResponse(c, 'forbidden', 'Cannot read drafts of this type', 403);
-    }
+    const ctx = { userId: auth.user.id, caps: auth.role.capabilities };
+    const allowed = row.authorId === auth.user.id
+      ? can(ctx, 'readDrafts', row.typeSlug)
+      : can(ctx, 'readOthersDrafts', row.typeSlug);
+    if (!allowed) return errorResponse(c, 'forbidden', 'Cannot read drafts of this type', 403);
   }
 
   const defaultLocale = await getDefaultLocale();
@@ -161,9 +168,11 @@ contentRoutes.get('/by-slug/:type/:slug', async (c) => {
 
   if (row.status !== 'published') {
     if (!auth) return errorResponse(c, 'unauthorized', 'Authentication required', 401);
-    if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'readDrafts', row.typeSlug, row.authorId)) {
-      return errorResponse(c, 'forbidden', 'Cannot read drafts of this type', 403);
-    }
+    const ctx = { userId: auth.user.id, caps: auth.role.capabilities };
+    const allowed = row.authorId === auth.user.id
+      ? can(ctx, 'readDrafts', row.typeSlug)
+      : can(ctx, 'readOthersDrafts', row.typeSlug);
+    if (!allowed) return errorResponse(c, 'forbidden', 'Cannot read drafts of this type', 403);
   }
 
   const includeRelations = (c.req.query('include') ?? '').split(',').includes('relations');
@@ -199,9 +208,11 @@ contentRoutes.get('/by-path/*', async (c) => {
 
   if (row.status !== 'published') {
     if (!auth) return errorResponse(c, 'unauthorized', 'Authentication required', 401);
-    if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'readDrafts', row.typeSlug, row.authorId)) {
-      return errorResponse(c, 'forbidden', 'Cannot read drafts of this type', 403);
-    }
+    const ctx = { userId: auth.user.id, caps: auth.role.capabilities };
+    const allowed = row.authorId === auth.user.id
+      ? can(ctx, 'readDrafts', row.typeSlug)
+      : can(ctx, 'readOthersDrafts', row.typeSlug);
+    if (!allowed) return errorResponse(c, 'forbidden', 'Cannot read drafts of this type', 403);
   }
 
   const includeRelations = (c.req.query('include') ?? '').split(',').includes('relations');
@@ -232,7 +243,7 @@ function depKeysForContent(typeSlug: string, locale: string, id: number): string
 
 contentRoutes.post('/', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   const body = (await c.req.json<{
     type?: string;
     slug?: string;
@@ -250,6 +261,12 @@ contentRoutes.post('/', async (c) => {
   }
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'create', body.type)) {
     return errorResponse(c, 'forbidden', `No create capability for ${body.type}`, 403);
+  }
+  // Creating directly in a published state requires the publish capability —
+  // otherwise `create` alone would let a contributor self-publish.
+  if ((body.status ?? 'draft') === 'published' &&
+      !can({ userId: auth.user.id, caps: auth.role.capabilities }, 'publish', body.type)) {
+    return errorResponse(c, 'forbidden', `No publish capability for ${body.type}`, 403);
   }
   const result = await createContent({
     type:          body.type,
@@ -278,7 +295,7 @@ contentRoutes.post('/', async (c) => {
 
 contentRoutes.patch('/:id', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   const id = Number(c.req.param('id'));
   if (!Number.isFinite(id) || id <= 0) return errorResponse(c, 'badRequest', 'Invalid id', 400);
 
@@ -289,6 +306,19 @@ contentRoutes.patch('/:id', async (c) => {
   }
 
   const body = await c.req.json<Record<string, unknown>>().catch(() => ({}));
+  // Publication-state changes (going live / setting publish or schedule times)
+  // require the publish capability. `/publish` and `/unpublish` are the
+  // supported path; this blocks mass-assigning `status`/`publishedAt`/
+  // `scheduledAt` through a plain update to bypass the publish gate.
+  const pub = body as { status?: unknown; publishedAt?: unknown; scheduledAt?: unknown };
+  const wantsPublishState =
+    pub.status === 'published' ||
+    pub.publishedAt !== undefined ||
+    pub.scheduledAt !== undefined;
+  if (wantsPublishState &&
+      !can({ userId: auth.user.id, caps: auth.role.capabilities }, 'publish', existing.typeSlug, existing.authorId)) {
+    return errorResponse(c, 'forbidden', 'No publish capability; use the publish endpoint', 403);
+  }
   const result = await updateContent(id, body as Parameters<typeof updateContent>[1], auth.user.id);
   if (!result.ok) {
     const status = result.status ?? 422;
@@ -311,7 +341,7 @@ contentRoutes.patch('/:id', async (c) => {
 
 contentRoutes.delete('/:id', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   const id = Number(c.req.param('id'));
   if (!Number.isFinite(id) || id <= 0) return errorResponse(c, 'badRequest', 'Invalid id', 400);
   const existing = await findById(id, true);
@@ -332,7 +362,7 @@ contentRoutes.delete('/:id', async (c) => {
 
 contentRoutes.post('/:id/publish', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   const id = Number(c.req.param('id'));
   if (!Number.isFinite(id) || id <= 0) return errorResponse(c, 'badRequest', 'Invalid id', 400);
   const existing = await findById(id, true);
@@ -354,7 +384,7 @@ contentRoutes.post('/:id/publish', async (c) => {
 
 contentRoutes.post('/:id/unpublish', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   const id = Number(c.req.param('id'));
   if (!Number.isFinite(id) || id <= 0) return errorResponse(c, 'badRequest', 'Invalid id', 400);
   const existing = await findById(id, true);

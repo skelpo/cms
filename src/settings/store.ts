@@ -31,6 +31,25 @@ export async function getAllSettings(): Promise<Record<string, unknown>> {
   return Object.fromEntries(cache!);
 }
 
+// Settings is a flat key/value store operators may use for secrets (SMTP creds,
+// API keys) and the maintenance-mode `site.previewToken`. Anything matching this
+// pattern is withheld from unauthenticated (public) reads.
+const SENSITIVE_KEY_RE = /(secret|password|passwd|token|api[_-]?key|private|credential|signkey|salt)/i;
+
+export function isSensitiveSettingKey(key: string): boolean {
+  return SENSITIVE_KEY_RE.test(key);
+}
+
+/** All settings minus any sensitive keys — safe to expose to anonymous callers. */
+export async function getPublicSettings(): Promise<Record<string, unknown>> {
+  await loadSettings();
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of cache!) {
+    if (!isSensitiveSettingKey(k)) out[k] = v;
+  }
+  return out;
+}
+
 export async function setSetting(key: string, value: unknown, updatedBy?: number | null): Promise<void> {
   await execute(
     `INSERT INTO \`settings\` (\`keyName\`, \`value\`, \`updatedBy\`)

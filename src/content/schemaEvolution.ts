@@ -87,8 +87,14 @@ export async function migrateFields(
 function applyTransform(name: string | undefined, value: unknown): unknown {
   if (!name) return value;
   switch (name) {
-    case 'parseInt':   return typeof value === 'string' ? parseInt(value, 10) : value;
-    case 'parseFloat': return typeof value === 'string' ? parseFloat(value)   : value;
+    case 'parseInt': {
+      const n = typeof value === 'string' ? parseInt(value, 10) : Number(value);
+      return Number.isFinite(n) ? n : null;   // un-parseable → null (fails required checks) rather than NaN
+    }
+    case 'parseFloat': {
+      const n = typeof value === 'string' ? parseFloat(value) : Number(value);
+      return Number.isFinite(n) ? n : null;
+    }
     case 'toString':   return value === null || value === undefined ? null : String(value);
     case 'toBoolean':  return Boolean(value);
     case 'toArray':    return Array.isArray(value) ? value : value !== null && value !== undefined ? [value] : [];

@@ -13,6 +13,7 @@ import type { Context } from 'hono';
 import {
   cacheGet,
   cacheSet,
+  currentGeneration,
   DepCollector,
   type CacheEntry,
 } from './deps.js';
@@ -37,10 +38,12 @@ export async function withCache(
   // Hit path.
   const hit = cacheGet(cacheKey);
   if (hit) {
-    return respondFromEntry(c, hit);
+    return respondFromEntry(c, hit, hit.cacheControl);
   }
 
-  // Miss — compute.
+  // Miss — compute. Snapshot the invalidation generation first so we can drop
+  // the result if a write lands while we compute (avoids caching stale data).
+  const gen = currentGeneration();
   const deps = new DepCollector();
   const result = await fn(deps);
   const body = normalizeBody(result.body);
@@ -53,8 +56,9 @@ export async function withCache(
     etag,
     deps: deps.list(),
     storedAt: Date.now(),
+    ...(result.cacheControl ? { cacheControl: result.cacheControl } : {}),
   };
-  cacheSet(cacheKey, entry);
+  if (currentGeneration() === gen) cacheSet(cacheKey, entry);
   return respondFromEntry(c, entry, result.cacheControl);
 }
 

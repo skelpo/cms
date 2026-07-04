@@ -104,3 +104,43 @@ export function can(
 
   return false;
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Privilege-escalation guards for role/user management
+// ────────────────────────────────────────────────────────────────────────
+
+/** Validate that an untrusted value has the shape { global: string[], types: Record<string,string[]> }. */
+export function isCapabilitiesShape(x: unknown): x is RoleCapabilities {
+  if (!x || typeof x !== 'object') return false;
+  const o = x as { global?: unknown; types?: unknown };
+  if (!Array.isArray(o.global) || !o.global.every((s) => typeof s === 'string')) return false;
+  if (o.types === undefined) return true;
+  if (typeof o.types !== 'object' || o.types === null) return false;
+  for (const v of Object.values(o.types as Record<string, unknown>)) {
+    if (!Array.isArray(v) || !v.every((s) => typeof s === 'string')) return false;
+  }
+  return true;
+}
+
+/**
+ * Whether `actor` already holds every capability in `wanted`. Used to stop a
+ * role/user manager from creating/assigning a role, or granting capabilities,
+ * more powerful than their own — closing the `manageRoles`/`manageUsers` →
+ * full-admin escalation. An actor with global `'*'` passes everything.
+ */
+export function grantsWithinActor(actor: RoleCapabilities, wanted: RoleCapabilities): boolean {
+  const actorGlobalAll = actor.global.includes('*');
+  for (const cap of wanted.global ?? []) {
+    if (cap === '*') { if (!actorGlobalAll) return false; continue; }
+    if (!actorGlobalAll && !actor.global.includes(cap)) return false;
+  }
+  if (actorGlobalAll) return true; // '*' covers every per-type capability too
+  for (const [type, caps] of Object.entries(wanted.types ?? {})) {
+    const actorTypeCaps = actor.types[type] ?? actor.types['*'] ?? [];
+    const actorTypeAll = actorTypeCaps.includes('*');
+    for (const cap of caps) {
+      if (!actorTypeAll && !actorTypeCaps.includes(cap)) return false;
+    }
+  }
+  return true;
+}

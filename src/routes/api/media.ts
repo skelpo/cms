@@ -14,10 +14,16 @@ import { signedImgproxyUrl, type TransformOpts } from '../../media/imgproxy.js';
 import { getSiteUrl } from '../../settings/store.js';
 import { normalizeDates } from '../../db/datetime.js';
 import { errorResponse } from './_helpers.js';
-import { requireAuth } from '../../auth/middleware.js';
+import { requireAuth, isResponse } from '../../auth/middleware.js';
 import { can } from '../../permissions/check.js';
 
 export const mediaRoutes = new Hono();
+
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024; // 25 MB
+// MIME types safe to serve inline; everything else (SVG, HTML, unknown) is sent
+// as an attachment + nosniff so it can't execute as active content on our
+// same-origin media path.
+const INLINE_SAFE = /^(?:image\/(?:png|jpe?g|gif|webp|avif|bmp|x-icon)|video\/[a-z0-9.+-]+|audio\/[a-z0-9.+-]+|application\/pdf)$/i;
 
 function publicShape(m: Awaited<ReturnType<typeof getMedia>>) {
   if (!m) return null;
@@ -39,7 +45,7 @@ function publicShape(m: Awaited<ReturnType<typeof getMedia>>) {
 
 mediaRoutes.get('/', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   const mimeType = c.req.query('mimeType');
   const list = await listMedia({
     ...(mimeType ? { mimeType } : {}),
@@ -66,9 +72,15 @@ mediaRoutes.get('/:id{[0-9]+}/raw', async (c) => {
   const direct = mediaPublicUrl(m);
   if (direct) return c.redirect(direct, 302);
   const bytes = await readMediaBytes(m);
+  const safeName = (m.filename || 'download').replace(/[^\w.\- ]+/g, '_').slice(0, 128);
+  const disposition = INLINE_SAFE.test(m.mimeType) ? 'inline' : `attachment; filename="${safeName}"`;
   return new Response(bytes as BodyInit, {
     headers: {
       'Content-Type': m.mimeType,
+      // Never let the browser sniff uploaded bytes into an executable type, and
+      // force non-image/av/pdf content to download rather than render inline.
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Disposition': disposition,
       'Cache-Control': 'public, max-age=31536000, immutable',
       'Content-Length': String(m.sizeBytes),
     },
@@ -105,7 +117,7 @@ mediaRoutes.get('/:id{[0-9]+}/url', async (c) => {
 
 mediaRoutes.post('/', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageMedia')) {
     return errorResponse(c, 'forbidden', 'manageMedia capability required', 403);
   }
@@ -113,6 +125,9 @@ mediaRoutes.post('/', async (c) => {
   const file = body.file;
   if (!file || typeof file === 'string') {
     return errorResponse(c, 'validationError', 'multipart `file` field required', 422);
+  }
+  if (file.size > MAX_UPLOAD_BYTES) {
+    return errorResponse(c, 'contentTooLarge', `file exceeds the ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))}MB limit`, 413);
   }
   // Opinionated stance: alt text is mandatory (a11y + SEO + LLM-friendly).
   let altText: Record<string, string> = {};
@@ -152,7 +167,7 @@ mediaRoutes.post('/', async (c) => {
 
 mediaRoutes.patch('/:id{[0-9]+}', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageMedia')) {
     return errorResponse(c, 'forbidden', 'manageMedia capability required', 403);
   }
@@ -171,7 +186,7 @@ mediaRoutes.patch('/:id{[0-9]+}', async (c) => {
 
 mediaRoutes.delete('/:id{[0-9]+}', async (c) => {
   const auth = requireAuth(c);
-  if (auth instanceof Response) return auth;
+  if (isResponse(auth)) return auth;
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageMedia')) {
     return errorResponse(c, 'forbidden', 'manageMedia capability required', 403);
   }

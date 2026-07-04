@@ -67,3 +67,27 @@ export async function ping(): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * Warn if the DB session time zone isn't UTC. The CMS writes UTC datetimes
+ * (JS toISOString) but many queries compare against NOW(), so a non-UTC session
+ * shifts job schedules, session expiry, and publishedAt by the offset. The pool
+ * exposes no reliable per-connection init hook, so we surface this loudly at
+ * boot rather than let it silently misbehave.
+ */
+export async function checkDbTimezone(): Promise<void> {
+  try {
+    const row = await queryOne<{ offsetSec: number | string; tz: string }>(
+      'SELECT TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), NOW()) AS offsetSec, @@session.time_zone AS tz',
+    );
+    if (row && Number(row.offsetSec) !== 0) {
+      console.warn(
+        `[skelpo-cms] WARNING: MySQL session time_zone is '${row.tz}' (offset ${row.offsetSec}s from UTC). ` +
+          `The CMS assumes UTC — configure the database/session time_zone to '+00:00' to avoid shifted ` +
+          `job schedules, session expiry, and publishedAt timestamps.`,
+      );
+    }
+  } catch {
+    /* non-fatal — inability to read the timezone must not block boot */
+  }
+}
