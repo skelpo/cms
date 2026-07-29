@@ -248,7 +248,7 @@ adminRoutes.get('/', async (c) => {
   const flash = c.req.query('ok');
 
   const recent = await query<{ id: number; title: string; typeSlug: string; status: string; updatedAt: unknown }>(
-    'SELECT `id`,`title`,`typeSlug`,`status`,`updatedAt` FROM `content` ORDER BY `updatedAt` DESC LIMIT 8',
+    "SELECT `id`,`title`,`typeSlug`,`status`,`updatedAt` FROM `content` WHERE `status` != 'archived' ORDER BY `updatedAt` DESC LIMIT 8",
   );
 
   return c.html(
@@ -356,7 +356,7 @@ adminRoutes.get('/', async (c) => {
 
 // ── Maintenance: toggle + rotate preview token ─────────────────────────
 
-import { setSetting, invalidateSettingsCache } from '../settings/store.js';
+import { setSetting, invalidateSettingsCache, getDefaultLocale } from '../settings/store.js';
 
 adminRoutes.post('/maintenance/toggle', async (c) => {
   const auth = gate(c);
@@ -463,9 +463,10 @@ adminRoutes.get('/content/:type', async (c) => {
     return c.html(<AdminPage title={t('common.forbidden')} t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('common.forbidden')}</AdminPage>, 403);
   }
 
-  // Locale filter — defaults to en. "all" shows every locale (useful for
-  // diffing translation coverage). Available locales come from site.locales.
-  const sel = c.req.query('locale') ?? 'en';
+  // Locale filter — defaults to the site's default locale. "all" shows every
+  // locale (useful for diffing translation coverage). Available locales come
+  // from site.locales.
+  const sel = c.req.query('locale') ?? (await getDefaultLocale());
   let availableLocales: string[] = ['en'];
   try {
     const sl = await queryOne<{ value: unknown }>(
@@ -482,7 +483,9 @@ adminRoutes.get('/content/:type', async (c) => {
   const { rows: allRows } = await listContent({
     typeSlug,
     locale: sel === 'all' ? undefined : sel,
-    status: canDrafts ? ['draft', 'review', 'published', 'archived'] : ['published'],
+    // Archived (soft-deleted) rows are hidden everywhere in the admin; purge
+    // or restore them via the API (`?status=archived`).
+    status: canDrafts ? ['draft', 'review', 'published'] : ['published'],
     includeDrafts: canDrafts,
     limit: 200,
     sort: '-updatedAt',
@@ -594,7 +597,7 @@ adminRoutes.get('/content/:type/new', async (c) => {
   let availableLocales: string[] = [];
   let defaultTitle = '';
   let defaultSlug = '';
-  let defaultLocale = localeParam ?? 'en';
+  let defaultLocale = localeParam ?? (await getDefaultLocale());
   let translationOf: number | undefined;
 
   if (translationOfParam) {
@@ -605,7 +608,7 @@ adminRoutes.get('/content/:type/new', async (c) => {
       defaultTitle = source.title;
       defaultSlug = source.slug;
       siblings = await query<{ id: number; locale: string; status: string }>(
-        'SELECT `id`, `locale`, `status` FROM `content` WHERE `translationGroupId` = ? AND `typeSlug` = ? ORDER BY `locale`',
+        "SELECT `id`, `locale`, `status` FROM `content` WHERE `translationGroupId` = ? AND `typeSlug` = ? AND `status` != 'archived' ORDER BY `locale`",
         [source.translationGroupId, ct.slug],
       );
       availableLocales = await readSiteLocales();
