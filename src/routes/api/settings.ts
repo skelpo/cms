@@ -3,6 +3,7 @@
 import { Hono } from 'hono';
 import { getAllSettings, getPublicSettings, getSetting, isSensitiveSettingKey, setSetting, invalidateSettingsCache } from '../../settings/store.js';
 import { invalidate } from '../../cache/deps.js';
+import { fireEvent } from '../../webhooks/dispatch.js';
 import { withCache } from '../../cache/respond.js';
 import { errorResponse } from './_helpers.js';
 import { requireAuth, isResponse } from '../../auth/middleware.js';
@@ -68,6 +69,7 @@ settingsRoutes.put('/:key', async (c) => {
   invalidateSettingsCache();
   invalidate([`setting:${key}`]);
   invalidate(['settings:all']);
+  void fireEvent('setting.changed', { key }, [`setting:${key}`, 'settings:all']);
   return c.json({ data: { [key]: body.value } });
 });
 
@@ -88,5 +90,8 @@ settingsRoutes.put('/', async (c) => {
   invalidateSettingsCache();
   invalidate(invalidated);
   invalidate(['settings:all']);
+  for (const key of Object.keys(body)) {
+    void fireEvent('setting.changed', { key }, [`setting:${key}`, 'settings:all']);
+  }
   return c.json({ data: body });
 });

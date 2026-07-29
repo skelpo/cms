@@ -27,8 +27,11 @@ export async function attachAdminI18n(c: Context, next: Next): Promise<void | Re
   const auth = c.get('auth');
   const fromUser = auth ? coerceLocale(auth.user.locale) : null;
   const fromCookie = coerceLocale(getCookie(c, ADMIN_LANG_COOKIE));
+  // Deployment-wide default (e.g. ADMIN_DEFAULT_LOCALE=de): beats browser
+  // negotiation, loses to an explicit per-user choice or cookie.
+  const fromEnv = coerceLocale(process.env.ADMIN_DEFAULT_LOCALE);
   const locale: AdminLocale =
-    fromUser ?? fromCookie ?? negotiateLocale(c.req.header('accept-language'));
+    fromUser ?? fromCookie ?? fromEnv ?? negotiateLocale(c.req.header('accept-language'));
 
   c.set('adminLocale', locale);
   c.set('t', makeT(locale));
