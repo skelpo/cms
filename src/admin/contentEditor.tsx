@@ -152,9 +152,8 @@ function skelpoRepeaterSerialize(wrap){
     });
     items.push(obj);
   });
-  wrap.querySelector('input[type=hidden][name="f_"+wrap.dataset.name]')
+  const hidden=wrap.querySelector('input[type=hidden][name="f_'+wrap.dataset.name+'"]')
     ||wrap.querySelector('input[type=hidden]');
-  const hidden=wrap.querySelector('input[type=hidden]');
   if(hidden)hidden.value=JSON.stringify(items);
 }
 function skelpoRepeaterRemove(card){
