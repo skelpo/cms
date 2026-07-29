@@ -363,17 +363,41 @@ const Field: FC<{ def: FieldDef; value: string; t: Translator }> = ({ def, value
     case 'select':
     case 'multiselect': {
       const opts = (def.validation?.options as string[] | undefined) ?? [];
+      if (def.type === 'select') {
+        return (
+          <div>
+            {label}
+            <select name={name}>
+              <option value="">—</option>
+              {opts.map((o) => (
+                <option value={o} selected={value.includes(o)}>
+                  {o}
+                </option>
+              ))}
+            </select>
+          </div>
+        );
+      }
+      // Multiselect renders as checkboxes (`name[]` → parseBody array); a
+      // <select multiple> needs ctrl-click and silently loses all but the
+      // last value in parseBody.
+      let selected: string[] = [];
+      try {
+        const p = JSON.parse(value);
+        if (Array.isArray(p)) selected = p.map(String);
+      } catch {
+        selected = value.split(',').map((s) => s.trim()).filter(Boolean);
+      }
       return (
         <div>
           {label}
-          <select name={name} multiple={def.type === 'multiselect'}>
-            {def.type === 'select' ? <option value="">—</option> : null}
+          <div style="display:flex;flex-wrap:wrap;gap:8px 18px;padding:6px 2px">
             {opts.map((o) => (
-              <option value={o} selected={value.includes(o)}>
-                {o}
-              </option>
+              <label style="display:flex;align-items:center;gap:6px;font-weight:400;margin:0;cursor:pointer">
+                <input type="checkbox" name={`${name}[]`} value={o} checked={selected.includes(o)} /> {o}
+              </label>
             ))}
-          </select>
+          </div>
         </div>
       );
     }
@@ -662,7 +686,7 @@ export const ContentForm: FC<{
  * by the type schema (booleans, numbers, JSON, relation id arrays).
  */
 export function parseContentForm(
-  body: Record<string, string | File>,
+  body: Record<string, string | string[] | File>,
   schema: FieldDef[],
 ): {
   title: string;
@@ -678,7 +702,9 @@ export function parseContentForm(
   const fields: Record<string, unknown> = {};
   for (const def of schema) {
     const raw = get(`f_${def.name}`);
-    if (raw === '' && !def.required) continue;
+    // Multiselect checkboxes post under `f_<name>[]` — presence there must
+    // not be skipped just because the plain key is empty.
+    if (raw === '' && !def.required && body[`f_${def.name}[]`] === undefined) continue;
     switch (def.type) {
       case 'number':
         fields[def.name] = raw === '' ? null : Number(raw);
@@ -704,9 +730,15 @@ export function parseContentForm(
           .map((s) => Number(s.trim()))
           .filter((n) => Number.isFinite(n));
         break;
-      case 'multiselect':
-        fields[def.name] = raw ? raw.split(',').map((s) => s.trim()) : [];
+      case 'multiselect': {
+        // Checkbox form posts `f_<name>[]` (array, or string when hono sees
+        // a single value); the comma form remains for API/legacy posts.
+        const arr = body[`f_${def.name}[]`];
+        if (Array.isArray(arr)) fields[def.name] = arr.map(String);
+        else if (typeof arr === 'string') fields[def.name] = [arr];
+        else fields[def.name] = raw ? raw.split(',').map((s) => s.trim()) : [];
         break;
+      }
       default:
         fields[def.name] = raw;
     }
