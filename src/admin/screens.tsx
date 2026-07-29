@@ -11,6 +11,7 @@ import { can } from '../permissions/check.js';
 import { getT, type Translator } from './i18n/index.js';
 import { getAllSettings, setSetting, invalidateSettingsCache } from '../settings/store.js';
 import { invalidate } from '../cache/deps.js';
+import { fireEvent } from '../webhooks/dispatch.js';
 import { execute, query, queryOne } from '../db/client.js';
 import { normalizeDates } from '../db/datetime.js';
 import { hashPassword } from '../auth/password.js';
@@ -355,6 +356,7 @@ adminScreens.post('/settings/:keyName', async (c) => {
   invalidate([`setting:${keyName}`]);
   invalidateSettingsCache();
   invalidate(['settings:all']);
+  void fireEvent('setting.changed', { key: keyName }, [`setting:${keyName}`, 'settings:all']);
   return c.redirect(`/admin/settings/${encodeURIComponent(keyName)}?ok=${encodeURIComponent(t('content.flashSaved'))}`, 302);
 });
 
