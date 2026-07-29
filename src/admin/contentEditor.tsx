@@ -370,7 +370,7 @@ const Field: FC<{ def: FieldDef; value: string; t: Translator }> = ({ def, value
             <select name={name}>
               <option value="">—</option>
               {opts.map((o) => (
-                <option value={o} selected={value.includes(o)}>
+                <option value={o} selected={value === o}>
                   {o}
                 </option>
               ))}
@@ -702,9 +702,11 @@ export function parseContentForm(
   const fields: Record<string, unknown> = {};
   for (const def of schema) {
     const raw = get(`f_${def.name}`);
-    // Multiselect checkboxes post under `f_<name>[]` — presence there must
-    // not be skipped just because the plain key is empty.
-    if (raw === '' && !def.required && body[`f_${def.name}[]`] === undefined) continue;
+    // Multiselect is never skipped: its checkboxes post under `f_<name>[]`,
+    // and an all-unchecked box submits *neither* key. Falling into the skip
+    // would drop the field from `fields` entirely (updateContent replaces the
+    // blob wholesale) instead of storing the `[]` the type promises.
+    if (raw === '' && !def.required && def.type !== 'multiselect') continue;
     switch (def.type) {
       case 'number':
         fields[def.name] = raw === '' ? null : Number(raw);
