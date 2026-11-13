@@ -7,6 +7,7 @@ import { hashPassword } from '../../auth/password.js';
 import { findRoleBySlug, findRoleById, listRoles, type UserRow, type RoleRow } from '../../auth/users.js';
 import { deleteAllSessionsForUser } from '../../auth/sessions.js';
 import { errorResponse } from './_helpers.js';
+import { config } from '../../config.js';
 import { requireAuth, isResponse } from '../../auth/middleware.js';
 import { can, grantsWithinActor, isCapabilitiesShape } from '../../permissions/check.js';
 
@@ -101,7 +102,7 @@ userRoutes.post('/', async (c) => {
     await enqueue('sendEmail', {
       templateSlug: 'userInvite',
       to: email,
-      variables: { siteName: 'Skelpo CMS', inviteUrl: `/admin/accept-invite?token=${inviteToken}` },
+      variables: { siteName: 'Skelpo CMS', inviteUrl: `${config.siteUrl.replace(/\/+$/, '')}/admin/accept-invite?token=${inviteToken}` },
     });
   }
   return c.json({ data: { id: Number(r.insertId), email, status: invited ? 'invited' : 'active' } }, 201);

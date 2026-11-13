@@ -1,25 +1,21 @@
-// Secondary admin screens: settings, users, redirects, menus, jobs,
-// webhooks. Server-rendered; forms POST to handlers that call the
+// Settings screens: the tabbed settings forms and the per-key editor. Server-rendered; forms POST to handlers that call the
 // store/writer functions directly (already inside an authed session).
 
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import type { FC } from 'hono/jsx';
-import { AdminPage, StatusBadge } from './layout.js';
+import { AdminPage } from './layout.js';
+import { query } from '../db/client.js';
 import type { AuthContext } from '../auth/middleware.js';
 import { can } from '../permissions/check.js';
 import { getT, type Translator } from './i18n/index.js';
-import { getAllSettings, setSetting, invalidateSettingsCache } from '../settings/store.js';
+import { getAllSettings, setSetting, invalidateSettingsCache, deleteSetting, isSensitiveSettingKey } from '../settings/store.js';
+import { listTypes } from '../content/types.js';
+import { config } from '../config.js';
+import { getEmailBackend, escapeHtml } from '../email/adapter.js';
 import { invalidate } from '../cache/deps.js';
 import { fireEvent } from '../webhooks/dispatch.js';
-import { execute, query, queryOne } from '../db/client.js';
-import { normalizeDates } from '../db/datetime.js';
-import { hashPassword } from '../auth/password.js';
-import { listRoles, findRoleBySlug } from '../auth/users.js';
-import { listMenus, getMenuTree, addMenuItem, deleteMenuItem } from '../menus/store.js';
-import { jobStats, retryJob } from '../jobs/queue.js';
-import { listWebhooks, createWebhook, deleteWebhook } from '../webhooks/dispatch.js';
-import { listMedia, getMedia, storeMedia, updateMedia, deleteMedia } from '../media/store.js';
+import { MEDIA_PICKER_SCRIPT } from './contentEditor.js';
 
 export const adminScreens = new Hono();
 
@@ -68,14 +64,45 @@ function countLeaves(o: unknown): number {
   return Object.values(o as Record<string, unknown>).reduce<number>((n, x) => n + countLeaves(x), 0);
 }
 
+// ── Settings: friendly tabbed forms; the raw key list lives under Advanced ──
+
+const SETTINGS_TABS = ['general', 'seo', 'email', 'maintenance', 'advanced'] as const;
+type SettingsTab = (typeof SETTINGS_TABS)[number];
+
+async function saveSetting(key: string, value: unknown, auth: AuthContext): Promise<void> {
+  await setSetting(key, value, auth.user.id);
+  invalidate([`setting:${key}`]);
+  invalidate(['settings:all']);
+  void fireEvent('setting.changed', { key }, [`setting:${key}`, 'settings:all']);
+}
+
+const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+
 adminScreens.get('/settings', async (c) => {
   const auth = gate(c);
   if (notAuth(auth)) return auth;
   const t = getT(c);
+  if (!need(c, auth, 'manageSettings')) {
+    return c.html(<AdminPage title={t('common.forbidden')} t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('common.forbidden')}</AdminPage>, 403);
+  }
   const all = await getAllSettings();
-  const flash = c.req.query('ok');
+  const tabParam = c.req.query('tab') ?? 'general';
+  const tab: SettingsTab = (SETTINGS_TABS as readonly string[]).includes(tabParam) ? (tabParam as SettingsTab) : 'general';
+  const ok = c.req.query('ok');
+  const err = c.req.query('err');
 
-  // Group by prefix before the first dot. Keys without a dot fall into 'general'.
+  const locales = Array.isArray(all['site.locales']) ? (all['site.locales'] as unknown[]).map(String) : ['en'];
+  const defaultLocale = str(all['site.defaultLocale']) || locales[0] || 'en';
+  const hiddenTypes = Array.isArray(all['admin.hiddenTypes']) ? (all['admin.hiddenTypes'] as unknown[]).map(String) : [];
+  const types = (await listTypes()).filter((ct) => !['form', 'errorPage'].includes(ct.slug));
+  const org = (all['seo.organizationSchema'] && typeof all['seo.organizationSchema'] === 'object'
+    ? all['seo.organizationSchema'] : {}) as Record<string, unknown>;
+  const maintenanceOn = all['site.maintenance'] === true;
+  const previewToken = str(all['site.previewToken']);
+  const siteUrl = str(all['site.url']).replace(/\/+$/, '');
+  const previewLink = siteUrl && previewToken ? `${siteUrl}/?preview=${encodeURIComponent(previewToken)}` : null;
+
+  // Advanced: every key, grouped by its prefix.
   const groups = new Map<string, { key: string; value: unknown }[]>();
   for (const key of Object.keys(all).sort()) {
     const prefix = key.includes('.') ? key.slice(0, key.indexOf('.')) : 'general';
@@ -85,30 +112,246 @@ adminScreens.get('/settings', async (c) => {
 
   return c.html(
     <AdminPage title={t('settings.title')} active="settings" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
-      <div class="top">
-        <h1>{t('settings.title')}</h1>
-        <span class="muted">{t('settings.summary', { settings: t.plural('settings.settingsCount', Object.keys(all).length), groups: t.plural('settings.groupsCount', groups.size) })}</span>
+      <div class="top"><h1>{t('settings.title')}</h1></div>
+      <div class="tabs">
+        {SETTINGS_TABS.map((s) => (
+          <a href={`/admin/settings?tab=${s}`} class={s === tab ? 'on' : ''}>{t(`settings.tab.${s}`)}</a>
+        ))}
       </div>
-      {flash ? <div class="ok">{decodeURIComponent(flash)}</div> : null}
-      {[...groups.entries()].map(([group, items]) => (
-        <div class="card" style="margin-bottom:14px">
-          <h3 style="margin:0 0 12px;font-size:13px;text-transform:uppercase;letter-spacing:0.06em;color:var(--mut)">{group}</h3>
-          <table>
-            <tbody>
-              {items.map((it) => (
-                <tr>
-                  <td style="width:40%">
-                    <a href={`/admin/settings/${encodeURIComponent(it.key)}`}>{it.key}</a>
-                  </td>
-                  <td class="muted">{describeShape(it.value, t)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      {ok ? <div class="ok" role="status">{ok}</div> : null}
+      {err ? <div class="err" role="alert">{err}</div> : null}
+
+      {tab === 'general' ? (
+        <form method="post" action="/admin/settings-form/general" class="card" style="max-width:720px" data-guard="1">
+          <label for="site_name" style="margin-top:0">{t('settings.siteName')}</label>
+          <input type="text" name="site_name" id="site_name" value={str(all['site.name'])} required />
+          <label for="site_tagline">{t('settings.tagline')}</label>
+          <input type="text" name="site_tagline" id="site_tagline" value={str(all['site.tagline'])} />
+          <div class="help">{t('settings.taglineHelp')}</div>
+          <label for="site_url">{t('settings.siteUrl')}</label>
+          <input type="url" name="site_url" id="site_url" value={str(all['site.url'])} required placeholder="https://www.example.com" />
+          <div class="help">{t('settings.siteUrlHelp')}</div>
+          <label for="site_locales">{t('settings.languages')}</label>
+          <input type="text" name="site_locales" id="site_locales" value={locales.join(', ')} required pattern="[A-Za-z, \-]+" />
+          <div class="help">{t('settings.languagesHelp')}</div>
+          <label for="site_defaultLocale">{t('settings.defaultLanguage')}</label>
+          <select name="site_defaultLocale" id="site_defaultLocale" style="max-width:200px">
+            {locales.map((l) => <option value={l} selected={l === defaultLocale}>{l}</option>)}
+          </select>
+          <div class="help">{t('settings.defaultLanguageHelp')}</div>
+          <label>{t('settings.menuTypes')}</label>
+          <div style="display:flex;flex-wrap:wrap;gap:2px 18px">
+            {types.map((ct) => (
+              <label class="check">
+                <input type="checkbox" name="shown_types" value={ct.slug} checked={!hiddenTypes.includes(ct.slug)} /> {ct.labelPlural}
+              </label>
+            ))}
+          </div>
+          <div class="help">{t('settings.menuTypesHelp')}</div>
+          <div style="margin-top:18px"><button class="btn" type="submit">{t('settings.saveChanges')}</button></div>
+        </form>
+      ) : null}
+
+      {tab === 'seo' ? (
+        <form method="post" action="/admin/settings-form/seo" class="card" style="max-width:720px" data-guard="1">
+          <label for="seo_robots" style="margin-top:0">{t('settings.searchVisibility')}</label>
+          <select name="seo_robots" id="seo_robots">
+            <option value="index,follow" selected={!str(all['seo.robots']).includes('noindex')}>{t('settings.searchVisible')}</option>
+            <option value="noindex,nofollow" selected={str(all['seo.robots']).includes('noindex')}>{t('settings.searchHidden')}</option>
+          </select>
+          <div class="help">{t('settings.searchVisibilityHelp')}</div>
+          <h3 style="margin-top:22px">{t('settings.organization')}</h3>
+          <div class="help" style="margin-top:0">{t('settings.organizationHelp')}</div>
+          <label for="org_name">{t('settings.orgName')}</label>
+          <input type="text" name="org_name" id="org_name" value={str(org.name)} />
+          <label for="org_url">{t('settings.orgUrl')}</label>
+          <input type="url" name="org_url" id="org_url" value={str(org.url)} placeholder={siteUrl} />
+          <label for="org_logo">{t('settings.orgLogo')}</label>
+          <input type="url" name="org_logo" id="org_logo" value={str(org.logo)} placeholder="https://…/logo.png" />
+          <div style="margin-top:18px"><button class="btn" type="submit">{t('settings.saveChanges')}</button></div>
+        </form>
+      ) : null}
+
+      {tab === 'email' ? (
+        <div class="card" style="max-width:720px">
+          <dl class="kv">
+            <dt>{t('settings.emailDelivery')}</dt>
+            <dd>
+              {config.email.backend === 'log'
+                ? <span class="badge b-arch">{t('settings.emailOff')}</span>
+                : <span class="badge b-pub">{t('settings.emailOn', { backend: config.email.backend })}</span>}
+            </dd>
+            <dt>{t('settings.emailFrom')}</dt>
+            <dd>{config.email.fromName} &lt;{config.email.from}&gt;</dd>
+          </dl>
+          <div class="help">
+            {config.email.backend === 'log' ? t('settings.emailOffHelp') : t('settings.emailOnHelp')}
+          </div>
+          <form method="post" action="/admin/settings-form/email-test" style="margin-top:16px">
+            <button class="btn sec" type="submit">{t('settings.emailSendTest', { email: auth.user.email })}</button>
+          </form>
         </div>
-      ))}
+      ) : null}
+
+      {tab === 'maintenance' ? (
+        <>
+          <div class="card" style={`max-width:720px;margin-bottom:14px;${maintenanceOn ? 'border-color:var(--acc)' : ''}`}>
+            <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+              <div style="flex:1;min-width:240px">
+                <div style="font-weight:600;font-size:14px">
+                  {t('dashboard.maintenanceMode')}{' '}
+                  <span style={`color:${maintenanceOn ? 'var(--acc2)' : 'var(--ok)'}`}>{maintenanceOn ? t('dashboard.on') : t('dashboard.off')}</span>
+                </div>
+                <div class="help">{maintenanceOn ? t('dashboard.maintenanceOnDesc') : t('dashboard.maintenanceOffDesc')}</div>
+              </div>
+              <form method="post" action="/admin/maintenance/toggle" style="margin:0">
+                <button class={maintenanceOn ? 'btn' : 'btn sec'} type="submit"
+                  data-confirm={maintenanceOn ? undefined : t('settings.maintenanceConfirm')}>
+                  {maintenanceOn ? t('dashboard.turnOff') : t('dashboard.turnOn')}
+                </button>
+              </form>
+            </div>
+            {previewLink ? (
+              <div style="margin-top:14px">
+                <div class="help">{t('dashboard.previewLinkLabel')}</div>
+                <code class="secret">{previewLink}</code>
+                <div class="toolbar">
+                  <button type="button" class="btn sm sec" data-copy={previewLink} data-copied={t('common.copied')}>{t('common.copy')}</button>
+                  <form method="post" action="/admin/maintenance/rotate-token" style="margin:0">
+                    <button class="btn sm sec" type="submit" title={t('dashboard.rotateTitle')} data-confirm={t('dashboard.rotateTitle')}>{t('dashboard.rotate')}</button>
+                  </form>
+                </div>
+              </div>
+            ) : (
+              <form method="post" action="/admin/maintenance/rotate-token" style="margin:14px 0 0">
+                <button class="btn sm sec" type="submit">{t('settings.createPreviewLink')}</button>
+              </form>
+            )}
+          </div>
+          <form method="post" action="/admin/settings-form/maintenance" class="card" style="max-width:720px" data-guard="1">
+            <h3>{t('settings.maintenanceMessage')}</h3>
+            <label for="m_title">{t('dashboard.visitorTitle')}</label>
+            <input type="text" name="m_title" id="m_title" value={str(all['site.maintenanceTitle'])} />
+            <label for="m_message">{t('dashboard.visitorBody')}</label>
+            <textarea name="m_message" id="m_message" rows={4}>{str(all['site.maintenanceMessage'])}</textarea>
+            <div style="margin-top:18px"><button class="btn" type="submit">{t('settings.saveChanges')}</button></div>
+          </form>
+        </>
+      ) : null}
+
+      {tab === 'advanced' ? (
+        <>
+          <div class="help" style="margin:0 0 14px">{t('settings.advancedIntro')}</div>
+          {[...groups.entries()].map(([group, items]) => (
+            <div class="card" style="margin-bottom:14px">
+              <h3 style="margin:0 0 12px;font-size:13px;text-transform:uppercase;letter-spacing:0.06em;color:var(--mut)">{group}</h3>
+              <table>
+                <tbody>
+                  {items.map((it) => (
+                    <tr>
+                      <td style="width:40%">
+                        <a href={`/admin/settings/${encodeURIComponent(it.key)}`}>{it.key}</a>
+                      </td>
+                      <td class="muted">{isSensitiveSettingKey(it.key) ? '••••••' : describeShape(it.value, t)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ))}
+          <form method="post" action="/admin/settings-form/add" class="card">
+            <h3>{t('settings.addSetting')}</h3>
+            <div class="toolbar" style="margin-top:10px">
+              <input type="text" name="key" required pattern="[A-Za-z][A-Za-z0-9_.\-]*" maxlength={128} placeholder={t('settings.addKeyPlaceholder')} style="min-width:240px" />
+              <input type="text" name="value" placeholder={t('settings.value')} style="min-width:240px;flex:1" />
+              <button class="btn sec" type="submit">{t('common.add')}</button>
+            </div>
+          </form>
+        </>
+      ) : null}
     </AdminPage>,
   );
+});
+
+adminScreens.post('/settings-form/:tab', async (c) => {
+  const auth = gate(c);
+  if (notAuth(auth)) return auth;
+  const t = getT(c);
+  const tab = c.req.param('tab');
+  const back = (name: string) => `/admin/settings?tab=${name}`;
+  if (!need(c, auth, 'manageSettings')) return c.redirect(`${back('general')}&err=${encodeURIComponent(t('common.forbidden'))}`, 302);
+  const body = await c.req.parseBody({ all: true });
+  const one = (k: string): string => {
+    const v = body[k];
+    return String((Array.isArray(v) ? v[v.length - 1] : v) ?? '').trim();
+  };
+  const saved = (name: string) => c.redirect(`${back(name)}&ok=${encodeURIComponent(t('settings.flashSaved'))}`, 302);
+  const failed = (name: string, message: string) => c.redirect(`${back(name)}&err=${encodeURIComponent(message)}`, 302);
+
+  if (tab === 'general') {
+    const locales = [...new Set(one('site_locales').split(/[\s,]+/).map((s) => s.trim()).filter(Boolean))];
+    if (locales.length === 0 || !locales.every((l) => /^[a-z]{2,3}(-[A-Za-z0-9]{2,8})?$/.test(l))) {
+      return failed('general', t('settings.errLanguages'));
+    }
+    if (!/^https?:\/\/[^\s]+$/.test(one('site_url'))) return failed('general', t('settings.errSiteUrl'));
+    if (!one('site_name')) return failed('general', t('settings.errSiteName'));
+    // Refuse to drop a language that still has content: it would vanish from the admin.
+    const used = await query<{ locale: string }>("SELECT DISTINCT `locale` FROM `content` WHERE `status` != 'archived'");
+    const orphaned = used.map((r) => r.locale).filter((l) => !locales.includes(l));
+    if (orphaned.length > 0) return failed('general', t('settings.errLanguageInUse', { locales: orphaned.join(', ') }));
+    const def = locales.includes(one('site_defaultLocale')) ? one('site_defaultLocale') : locales[0]!;
+    const shownRaw = body.shown_types;
+    const shown = (Array.isArray(shownRaw) ? shownRaw : shownRaw ? [shownRaw] : []).map(String);
+    const hidden = (await listTypes()).map((ct) => ct.slug).filter((s) => !['form', 'errorPage'].includes(s) && !shown.includes(s));
+    await saveSetting('site.name', one('site_name'), auth);
+    await saveSetting('site.tagline', one('site_tagline'), auth);
+    await saveSetting('site.url', one('site_url').replace(/\/+$/, ''), auth);
+    await saveSetting('site.locales', locales, auth);
+    await saveSetting('site.defaultLocale', def, auth);
+    await saveSetting('admin.hiddenTypes', hidden, auth);
+    return saved('general');
+  }
+  if (tab === 'seo') {
+    const all = await getAllSettings();
+    const prev = (all['seo.organizationSchema'] && typeof all['seo.organizationSchema'] === 'object'
+      ? all['seo.organizationSchema'] : { '@type': 'Organization' }) as Record<string, unknown>;
+    const org: Record<string, unknown> = { ...prev, name: one('org_name') };
+    if (one('org_url')) org.url = one('org_url'); else delete org.url;
+    if (one('org_logo')) org.logo = one('org_logo'); else delete org.logo;
+    await saveSetting('seo.robots', one('seo_robots') === 'noindex,nofollow' ? 'noindex,nofollow' : 'index,follow', auth);
+    await saveSetting('seo.organizationSchema', org, auth);
+    return saved('seo');
+  }
+  if (tab === 'maintenance') {
+    await saveSetting('site.maintenanceTitle', one('m_title'), auth);
+    await saveSetting('site.maintenanceMessage', one('m_message'), auth);
+    return saved('maintenance');
+  }
+  if (tab === 'email-test') {
+    try {
+      const name = str((await getAllSettings())['site.name']) || 'Skelpo CMS';
+      await getEmailBackend().send({
+        to: auth.user.email,
+        subject: t('settings.emailTestSubject', { site: name }),
+        text: t('settings.emailTestBody', { site: name }),
+        html: `<p>${escapeHtml(t('settings.emailTestBody', { site: name }))}</p>`,
+      });
+    } catch (e) {
+      return failed('email', t('settings.emailTestFailed', { error: e instanceof Error ? e.message : String(e) }));
+    }
+    return c.redirect(`${back('email')}&ok=${encodeURIComponent(
+      config.email.backend === 'log' ? t('settings.emailTestLogged') : t('settings.emailTestSent', { email: auth.user.email }),
+    )}`, 302);
+  }
+  if (tab === 'add') {
+    const key = one('key');
+    if (!/^[A-Za-z][A-Za-z0-9_.-]{0,127}$/.test(key)) return failed('advanced', t('settings.errKey'));
+    const all = await getAllSettings();
+    if (key in all) return failed('advanced', t('settings.errKeyExists', { key }));
+    await saveSetting(key, one('value'), auth);
+    return c.redirect(`/admin/settings/${encodeURIComponent(key)}?ok=${encodeURIComponent(t('settings.flashSaved'))}`, 302);
+  }
+  return c.redirect(back('general'), 302);
 });
 
 // ── Settings: per-key edit page (shape-aware UI, no JSON) ────────────────
@@ -130,6 +373,16 @@ function flattenLeaves(o: unknown, prefix = ''): FlatLeaf[] {
   );
 }
 
+/** Read a dot-path from a value (used to keep leaf types stable on save). */
+function getPath(source: unknown, path: string): unknown {
+  let cur: unknown = source;
+  for (const k of path.split('.')) {
+    if (cur === null || typeof cur !== 'object') return undefined;
+    cur = (cur as Record<string, unknown>)[k];
+  }
+  return cur;
+}
+
 /** Set a dot-path on a target object, coercing array indexes from numeric segments. */
 function setPath(target: Record<string, unknown>, path: string, value: unknown): void {
   const parts = path.split('.');
@@ -144,6 +397,44 @@ function setPath(target: Record<string, unknown>, path: string, value: unknown):
   }
   cur[parts[parts.length - 1]!] = value;
 }
+
+/** Settings values that hold a media id (e.g. `page.heroes.news.image`,
+ *  `footer.awards[].image`) get the visual media picker instead of a number
+ *  input — the editor never has to look an id up in the library. */
+const IMAGE_FIELD_RE = /^(image|logo|photo|heroimage|icon|thumbnail|cover|bild)$/i;
+const isImageField = (path: string) => IMAGE_FIELD_RE.test(path.split('.').pop() ?? '');
+
+const ImageField: FC<{ name: string; value: string; t: Translator }> = ({ name, value, t }) => (
+  <div
+    class="skelpo-imgfield"
+    style="display:flex;gap:14px;align-items:flex-start;background:var(--panel2);border:1px solid var(--line);border-radius:7px;padding:12px"
+  >
+    <div
+      class="skelpo-imgfield-preview"
+      style="width:96px;height:96px;background:var(--bg);border:1px solid var(--line);border-radius:6px;display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0"
+    >
+      {value ? (
+        <img src={`/api/v1/media/${value}/raw`} alt="" style="width:100%;height:100%;object-fit:cover;display:block" />
+      ) : (
+        <span class="muted" style="font-size:11px">{t('editor.noImage')}</span>
+      )}
+    </div>
+    <div style="flex:1;min-width:0">
+      <div class="muted" style="font-size:11px;margin-bottom:8px">
+        {value ? t('editor.mediaRef', { id: value }) : t('editor.noImageSelected')}
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button type="button" class="btn sm" onclick={`skelpoOpenMediaPicker('${name}')`}>
+          {value ? t('editor.change') : t('editor.pickImage')}
+        </button>
+        {value ? (
+          <button type="button" class="btn sm sec" onclick={`skelpoClearMediaField('${name}')`}>{t('editor.clear')}</button>
+        ) : null}
+      </div>
+      <input type="hidden" name={name} value={value} data-skelpo-imgfield-input={name} />
+    </div>
+  </div>
+);
 
 function shapeOf(v: unknown): 'string' | 'multiline' | 'number' | 'boolean' | 'tags' | 'repeater' | 'tree' | 'empty' {
   if (v === null || v === undefined) return 'empty';
@@ -170,13 +461,13 @@ adminScreens.get('/settings/:keyName', async (c) => {
   }
   const value = all[keyName];
   const shape = shapeOf(value);
-  const flash = c.req.query('ok') ? { ok: decodeURIComponent(c.req.query('ok')!) } : undefined;
+  const flash = c.req.query('ok') ? { ok: c.req.query('ok')! } : undefined;
 
   return c.html(
     <AdminPage title={keyName} active="settings" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <div class="top">
         <h1 style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:18px">{keyName}</h1>
-        <a class="btn sec" href="/admin/settings">{t('settings.allSettings')}</a>
+        <a class="btn sec" href="/admin/settings?tab=advanced">{t('settings.allSettings')}</a>
       </div>
       <div class="muted" style="margin-bottom:14px;font-size:12px">{t(`settings.shape.${shape}`)}</div>
       {flash?.ok ? <div class="ok">{flash.ok}</div> : null}
@@ -210,12 +501,33 @@ adminScreens.get('/settings/:keyName', async (c) => {
         ) : null}
         {shape === 'repeater' ? <RepeaterEditor value={value as Record<string, unknown>[]} t={t} /> : null}
         {shape === 'tree' ? <TreeEditor value={value as Record<string, unknown>} t={t} /> : null}
-        {shape === 'empty' ? <div class="muted">{t('settings.emptyDelete')} <a href={`/admin/settings/${encodeURIComponent(keyName)}/delete`}>{t('settings.deleteSetting')}</a></div> : null}
+        {shape === 'empty' ? (
+          <div class="muted">
+            {t('settings.emptyDelete')}{' '}
+            <button type="submit" class="btn sm sec" formaction={`/admin/settings/${encodeURIComponent(keyName)}/delete`} formnovalidate>
+              {t('settings.deleteSetting')}
+            </button>
+          </div>
+        ) : null}
         <div style="margin-top:18px;display:flex;gap:8px">
           <button class="btn" type="submit">{t('settings.save')}</button>
-          <a class="btn sec" href="/admin/settings">{t('settings.cancel')}</a>
+          <a class="btn sec" href="/admin/settings?tab=advanced">{t('settings.cancel')}</a>
         </div>
       </form>
+      {/* Media picker for image-valued settings (same dialog as the content editor) */}
+      <script
+        dangerouslySetInnerHTML={{
+          __html: `window.SKELPO_I18N=${JSON.stringify({
+            pickTitle: t('media.pickTitle'),
+            close: t('media.close'),
+            loading: t('media.loading'),
+            mediaRef: t('editor.mediaRef'),
+            noImage: t('editor.noImage'),
+            noImageSelected: t('editor.noImageSelected'),
+          })};`,
+        }}
+      />
+      <script dangerouslySetInnerHTML={{ __html: MEDIA_PICKER_SCRIPT }} />
     </AdminPage>,
   );
 });
@@ -236,7 +548,9 @@ const RepeaterEditor: FC<{ value: Record<string, unknown>[]; t: Translator }> = 
             return (
               <div>
                 <label>{field}</label>
-                {isMulti ? (
+                {isImageField(field) ? (
+                  <ImageField name={name} value={String(v ?? '')} t={t} />
+                ) : isMulti ? (
                   <textarea name={name} rows={3}>{String(v ?? '')}</textarea>
                 ) : (
                   <input type="text" name={name} value={String(v ?? '')} />
@@ -272,7 +586,9 @@ const TreeEditor: FC<{ value: Record<string, unknown>; t: Translator }> = ({ val
             {items.map((leaf) => (
               <div>
                 <label style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px">{leaf.path}</label>
-                {leaf.multiline ? (
+                {isImageField(leaf.path) ? (
+                  <ImageField name={`leaf_${leaf.path}`} value={leaf.value} t={t} />
+                ) : leaf.multiline ? (
                   <textarea name={`leaf_${leaf.path}`} rows={3}>{leaf.value}</textarea>
                 ) : (
                   <input type="text" name={`leaf_${leaf.path}`} value={leaf.value} />
@@ -339,11 +655,20 @@ adminScreens.post('/settings/:keyName', async (c) => {
       break;
     }
     case 'tree': {
+      const all = await getAllSettings();
+      const original = all[keyName];
       const result: Record<string, unknown> = {};
       for (const [field, raw] of Object.entries(body)) {
         if (!field.startsWith('leaf_')) continue;
         const path = field.slice('leaf_'.length);
-        setPath(result, path, String(raw));
+        // Preserve the original leaf type — media ids stay numbers, not "141".
+        const prev = getPath(original, path);
+        const str = String(raw);
+        const value =
+          typeof prev === 'number' && str.trim() !== '' && !Number.isNaN(Number(str)) ? Number(str)
+          : typeof prev === 'boolean' ? str === 'true'
+          : str;
+        setPath(result, path, value);
       }
       newValue = result;
       break;
@@ -360,1004 +685,18 @@ adminScreens.post('/settings/:keyName', async (c) => {
   return c.redirect(`/admin/settings/${encodeURIComponent(keyName)}?ok=${encodeURIComponent(t('content.flashSaved'))}`, 302);
 });
 
-// ── Media library ──────────────────────────────────────────────────────
-
-function fmtBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
-  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
-}
-
-const MEDIA_CSS = `
-.media-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:14px;margin-top:14px}
-.media-card{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden;cursor:pointer;transition:border-color .15s;position:relative}
-.media-card:hover{border-color:var(--acc)}
-.media-card.selected{border-color:var(--acc2);box-shadow:0 0 0 2px var(--acc2)}
-.media-thumb{aspect-ratio:1;background:var(--panel2);display:flex;align-items:center;justify-content:center;overflow:hidden}
-.media-thumb img{width:100%;height:100%;object-fit:cover;display:block}
-.media-thumb .ico{font-size:32px;color:var(--mut)}
-.media-meta{padding:8px 10px;font-size:11px;line-height:1.3}
-.media-meta .fn{color:var(--ink);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.media-meta .sub{color:var(--mut);margin-top:2px;font-size:10px}
-.dropzone{border:2px dashed var(--line);border-radius:10px;padding:32px 18px;text-align:center;color:var(--mut);background:var(--panel);transition:all .15s}
-.dropzone.over{border-color:var(--acc);background:rgba(245,158,11,.08);color:var(--ink)}
-.dropzone strong{color:var(--ink);font-weight:600}
-.dropzone .small{font-size:12px;margin-top:6px;color:var(--mut)}
-.dropzone input[type=file]{display:none}
-.dropzone label{cursor:pointer;display:inline-block;margin:0;padding:6px 14px;background:var(--acc);color:#1a1205;border-radius:6px;font-weight:600;font-size:13px}
-.media-progress{height:3px;background:var(--line);border-radius:2px;overflow:hidden;margin-top:8px}
-.media-progress > div{height:100%;background:var(--acc);width:0%;transition:width .15s}
-.media-dialog{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:0;max-width:520px;width:90%}
-.media-dialog::backdrop{background:rgba(0,0,0,0.5)}
-.media-dialog-inner{padding:18px}
-.media-dialog .preview{aspect-ratio:1;background:var(--panel2);border-radius:8px;overflow:hidden;max-width:260px;margin:0 auto 16px}
-.media-dialog .preview img{width:100%;height:100%;object-fit:contain;display:block}
-`;
-
-adminScreens.get('/media', async (c) => {
+adminScreens.post('/settings/:keyName/delete', async (c) => {
   const auth = gate(c);
   if (notAuth(auth)) return auth;
   const t = getT(c);
-  const filter = c.req.query('type') ?? '';
-  const items = await listMedia({ ...(filter ? { mimeType: filter } : {}), limit: 200 });
-  // Raw templates (placeholders intact) for the client-side upload script.
-  const mediaI18n = {
-    uploading: t('media.uploading'),
-    altPrompt: t('editor.altPromptA11y'),
-    skipped: t('media.skippedNoAlt'),
-    failed: t('media.uploadFailed'),
-    uploadedOne: t.plural('media.uploaded', 1, { n: '{n}' }),
-    uploadedOther: t.plural('media.uploaded', 2, { n: '{n}' }),
-  };
-
-  return c.html(
-    <AdminPage title={t('media.title')} active="media" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
-      <style dangerouslySetInnerHTML={{ __html: MEDIA_CSS }} />
-      <div class="top">
-        <h1>{t('media.title')}</h1>
-        <form method="get" style="display:flex;gap:8px;margin:0">
-          <select name="type" onchange="this.form.submit()" style="background:var(--panel2);border:1px solid var(--line);color:var(--ink);padding:6px 10px;border-radius:6px;font-size:13px">
-            <option value="" selected={filter === ''}>{t('media.allTypes')}</option>
-            <option value="image/" selected={filter === 'image/'}>{t('media.images')}</option>
-            <option value="video/" selected={filter === 'video/'}>{t('media.videos')}</option>
-            <option value="audio/" selected={filter === 'audio/'}>{t('media.audio')}</option>
-            <option value="application/pdf" selected={filter === 'application/pdf'}>{t('media.pdfs')}</option>
-          </select>
-        </form>
-      </div>
-
-      <div class="card" style="margin-bottom:14px;padding:14px">
-        <div id="dropzone" class="dropzone">
-          <div><strong>{t('media.dropStrong')}</strong> {t('media.dropPrompt')}</div>
-          <div class="small">{t('media.or')} <label for="dz-file">{t('media.chooseFiles')}</label> · {t('media.dropHint')}</div>
-          <input id="dz-file" type="file" multiple accept="image/*,application/pdf,video/*" />
-          <div id="dz-progress" class="media-progress" style="display:none"><div></div></div>
-          <div id="dz-status" class="small" style="margin-top:6px"></div>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="muted" style="font-size:12px">{t.plural('common.items', items.length)}</div>
-        <div id="media-grid" class="media-grid">
-          {items.length === 0 ? (
-            <div class="muted" style="grid-column:1/-1;text-align:center;padding:30px;font-size:13px">
-              {t('media.empty')}
-            </div>
-          ) : items.map((m) => (
-            <a class="media-card" href={`/admin/media/${m.id}`} title={m.filename}>
-              <div class="media-thumb">
-                {m.mimeType.startsWith('image/')
-                  ? <img src={`/api/v1/media/${m.id}/raw`} alt="" loading="lazy" />
-                  : <div class="ico">{m.mimeType.startsWith('video/') ? '🎬' : m.mimeType === 'application/pdf' ? '📄' : '📎'}</div>}
-              </div>
-              <div class="media-meta">
-                <div class="fn">{m.filename}</div>
-                <div class="sub">{fmtBytes(m.sizeBytes)}{m.width && m.height ? ` · ${m.width}×${m.height}` : ''}</div>
-              </div>
-            </a>
-          ))}
-        </div>
-      </div>
-
-      <script dangerouslySetInnerHTML={{ __html: `window.SKELPO_I18N=${JSON.stringify(mediaI18n)};` }} />
-      <script dangerouslySetInnerHTML={{ __html: `
-        (function(){
-          var I18N=window.SKELPO_I18N||{};
-          const dz=document.getElementById('dropzone');
-          const input=document.getElementById('dz-file');
-          const progress=document.getElementById('dz-progress');
-          const bar=progress.firstElementChild;
-          const status=document.getElementById('dz-status');
-          function setOver(on){dz.classList.toggle('over',on);}
-          ['dragenter','dragover'].forEach(e=>dz.addEventListener(e,(ev)=>{ev.preventDefault();setOver(true);}));
-          ['dragleave','drop'].forEach(e=>dz.addEventListener(e,(ev)=>{ev.preventDefault();setOver(false);}));
-          dz.addEventListener('drop',(ev)=>{uploadAll(ev.dataTransfer.files);});
-          input.addEventListener('change',(ev)=>{uploadAll(input.files);});
-          async function uploadAll(files){
-            if(!files||files.length===0)return;
-            progress.style.display='block';bar.style.width='0%';
-            let done=0;
-            for(const f of files){
-              status.textContent=(I18N.uploading||'Uploading {file} ({done}/{total})…').replace('{file}',f.name).replace('{done}',done+1).replace('{total}',files.length);
-              try{
-                const isImage=f.type.startsWith('image/');
-                let alt='';
-                if(isImage){
-                  alt=prompt((I18N.altPrompt||'Alt text for "{file}" (required for accessibility):').replace('{file}',f.name),f.name.replace(/\\.[^.]+$/,'').replace(/[-_]/g,' '))||'';
-                  if(!alt){status.textContent=(I18N.skipped||'Skipped (no alt text): {file}').replace('{file}',f.name);continue;}
-                }
-                const fd=new FormData();
-                fd.append('file',f);
-                if(isImage)fd.append('altText',JSON.stringify({en:alt}));
-                const r=await fetch('/admin/media/upload',{method:'POST',body:fd,credentials:'same-origin'});
-                if(!r.ok)throw new Error('HTTP '+r.status);
-              }catch(e){
-                status.textContent=(I18N.failed||'Failed: {file} ({error})').replace('{file}',f.name).replace('{error}',e.message);
-                return;
-              }
-              done++;bar.style.width=(done/files.length*100)+'%';
-            }
-            status.textContent=(done===1?(I18N.uploadedOne||'Uploaded {n} file.'):(I18N.uploadedOther||'Uploaded {n} files.')).replace('{n}',done);
-            setTimeout(()=>{location.reload();},500);
-          }
-        })();
-      ` }} />
-    </AdminPage>,
-  );
-});
-
-// Detail / edit modal for a single media row.
-adminScreens.get('/media/:id{[0-9]+}', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  const t = getT(c);
-  const m = await getMedia(Number(c.req.param('id')));
-  if (!m) return c.html(<AdminPage title={t('common.notFound')} t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('media.notFound')}</AdminPage>, 404);
-  const altObj = (typeof m.altText === 'object' && m.altText !== null ? m.altText : {}) as Record<string, string>;
-
-  return c.html(
-    <AdminPage title={m.filename} active="media" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
-      <style dangerouslySetInnerHTML={{ __html: MEDIA_CSS }} />
-      <div class="top">
-        <h1 style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:16px">{m.filename}</h1>
-        <a class="btn sec" href="/admin/media">{t('media.allMedia')}</a>
-      </div>
-      <div class="grid g2" style="align-items:start">
-        <div class="card">
-          {m.mimeType.startsWith('image/') ? (
-            <img src={`/api/v1/media/${m.id}/raw`} alt={altObj.en ?? ''} style="max-width:100%;border-radius:7px;display:block" />
-          ) : (
-            <div style="aspect-ratio:1;background:var(--panel2);display:flex;align-items:center;justify-content:center;font-size:48px;color:var(--mut);border-radius:7px">
-              {m.mimeType.startsWith('video/') ? '🎬' : m.mimeType === 'application/pdf' ? '📄' : '📎'}
-            </div>
-          )}
-        </div>
-        <div class="card">
-          <form method="post" action={`/admin/media/${m.id}`}>
-            <label>{t('media.altText')} <span class="muted" style="font-weight:400">· {t('media.altTextNote')}</span></label>
-            <input type="text" name="altText_en" value={altObj.en ?? ''} placeholder={t('media.altPlaceholder')} />
-            <label>{t('media.filename')}</label>
-            <input type="text" name="filename" value={m.filename} />
-            <div class="muted" style="font-size:12px;margin-top:18px;line-height:1.6">
-              <div><strong>{t('media.metaType')}</strong> {m.mimeType}</div>
-              <div><strong>{t('media.metaSize')}</strong> {fmtBytes(m.sizeBytes)}</div>
-              {m.width && m.height ? <div><strong>{t('media.metaDimensions')}</strong> {m.width} × {m.height}</div> : null}
-              <div><strong>{t('media.metaPublicUrl')}</strong> <code style="font-size:11px;background:var(--panel2);padding:2px 6px;border-radius:4px">/api/v1/media/{m.id}/raw</code></div>
-            </div>
-            <div style="margin-top:18px;display:flex;gap:8px">
-              <button class="btn" type="submit" name="action" value="save">{t('media.save')}</button>
-              <button class="btn sec" type="submit" name="action" value="delete" style="color:var(--err);margin-left:auto"
-                onclick={'return confirm(' + JSON.stringify(t('media.confirmDelete')) + ')'}>{t('media.delete')}</button>
-            </div>
-          </form>
-        </div>
-      </div>
-    </AdminPage>,
-  );
-});
-
-adminScreens.post('/media/:id{[0-9]+}', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  if (!need(c, auth, 'manageMedia')) return c.redirect('/admin/media', 302);
-  const id = Number(c.req.param('id'));
-  const body = await c.req.parseBody();
-  if (body.action === 'delete') {
-    await deleteMedia(id);
-    return c.redirect('/admin/media', 302);
+  if (!need(c, auth, 'manageSettings')) {
+    return c.redirect('/admin/settings?ok=' + encodeURIComponent(t('common.forbidden')), 302);
   }
-  await updateMedia(id, {
-    altText: { en: String(body.altText_en ?? '') },
-    filename: String(body.filename ?? '').trim() || undefined,
-  });
-  return c.redirect(`/admin/media/${id}`, 302);
-});
-
-// Multipart upload from the admin (browser-side drag-drop or picker).
-adminScreens.post('/media/upload', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  if (!need(c, auth, 'manageMedia')) return c.json({ error: 'forbidden' }, 403);
-  const body = await c.req.parseBody();
-  const file = body.file;
-  if (!file || typeof file === 'string') return c.json({ error: 'file required' }, 422);
-  if (file.size > 25 * 1024 * 1024) return c.json({ error: 'file exceeds 25MB limit' }, 413);
-  let altText: Record<string, string> = {};
-  try { altText = body.altText ? JSON.parse(String(body.altText)) : {}; }
-  catch { altText = { en: String(body.altText ?? '') }; }
-  const isImage = (file.type || '').startsWith('image/');
-  if (isImage && Object.values(altText).filter(Boolean).length === 0) {
-    return c.json({ error: 'altText required for images' }, 422);
-  }
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  const row = await storeMedia({
-    filename: file.name || 'upload',
-    mimeType: file.type || 'application/octet-stream',
-    bytes,
-    altText,
-    uploadedBy: auth.user.id,
-  });
-  return c.json({ data: { id: row.id, filename: row.filename, urlRaw: `/api/v1/media/${row.id}/raw`, mimeType: row.mimeType, width: row.width, height: row.height } }, 201);
-});
-
-// Picker fragment — embedded in the content editor's modal. Returns just
-// a grid (no chrome) so it can be loaded via fetch + innerHTML.
-adminScreens.get('/media/picker', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  const t = getT(c);
-  const items = await listMedia({ mimeType: 'image/', limit: 200 });
-  // Returns a fragment, not a full page. CSS comes from the parent.
-  return c.html(
-    <div>
-      <style dangerouslySetInnerHTML={{ __html: MEDIA_CSS }} />
-      {items.length === 0 ? (
-        <div class="muted" style="text-align:center;padding:30px;font-size:13px">
-          {t('media.pickerEmpty')} <a href="/admin/media" target="_blank">{t('media.pickerGoToLibrary')}</a>
-        </div>
-      ) : (
-        <div class="media-grid">
-          {items.map((m) => {
-            const alt = typeof m.altText === 'object' && m.altText ? (m.altText as Record<string, string>).en ?? '' : '';
-            return (
-              <button
-                type="button"
-                class="media-card"
-                style="background:none;padding:0;font:inherit;color:inherit;border:1px solid var(--line)"
-                data-id={m.id}
-                data-url={`/api/v1/media/${m.id}/raw`}
-                data-alt={alt}
-                data-filename={m.filename}
-                onclick={`window.skelpoMediaPick(${m.id}, '/api/v1/media/${m.id}/raw', ${JSON.stringify(alt)}, ${JSON.stringify(m.filename)})`}
-              >
-                <div class="media-thumb"><img src={`/api/v1/media/${m.id}/raw`} alt="" loading="lazy" /></div>
-                <div class="media-meta">
-                  <div class="fn">{m.filename}</div>
-                  <div class="sub">{m.width && m.height ? `${m.width}×${m.height}` : fmtBytes(m.sizeBytes)}</div>
-                </div>
-              </button>
-            );
-          })}
-        </div>
-      )}
-    </div>,
-  );
-});
-
-// ── Forms ──────────────────────────────────────────────────────────────
-// Forms ARE content rows of type `form`; submissions live in their own
-// `formSubmissions` table referencing form.id. This screen wraps both:
-// the list lives next to the submission counts, click a form to see
-// what's come in.
-
-adminScreens.get('/forms', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  const t = getT(c);
-  const canManageForms = need(c, auth, 'manageForms');
-  const canViewSubs    = canManageForms || need(c, auth, 'viewSubmissions');
-  if (!canViewSubs) {
-    return c.html(
-      <AdminPage title={t('forms.title')} active="forms" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
-        <div class="card" style="text-align:center;padding:30px">
-          <p class="muted">{t('forms.noAccess', { cap1: 'viewSubmissions', cap2: 'manageForms' })}</p>
-        </div>
-      </AdminPage>,
-      403,
-    );
-  }
-
-  // Form definitions are content rows (one per locale; show default
-  // locale only for the list).
-  const defaultLocale = (await queryOne<{ value: unknown }>(
-    "SELECT `value` FROM `settings` WHERE `keyName` = 'site.defaultLocale'",
-  ))?.value;
-  const localeFilter = typeof defaultLocale === 'string'
-    ? defaultLocale.replace(/^"|"$/g, '')
-    : (Array.isArray(defaultLocale) ? defaultLocale[0] : 'en');
-
-  const forms = await query<{ id: number; slug: string; title: string; status: string; locale: string }>(
-    `SELECT \`id\`, \`slug\`, \`title\`, \`status\`, \`locale\`
-       FROM \`content\` WHERE \`typeSlug\` = 'form' AND \`locale\` = ?
-      ORDER BY \`title\``,
-    [localeFilter],
-  );
-
-  // Submission + spam counts in one round-trip.
-  const counts = await query<{ formId: number; total: number; spam: number }>(
-    `SELECT \`formId\`, COUNT(*) AS total, SUM(\`isSpam\`) AS spam
-       FROM \`formSubmissions\` GROUP BY \`formId\``,
-  );
-  const cMap = new Map(counts.map((c) => [c.formId, c]));
-
-  return c.html(
-    <AdminPage title={t('forms.title')} active="forms" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
-      <div class="top">
-        <h1>{t('forms.title')}</h1>
-        {canManageForms ? <a class="btn" href="/admin/content/form/new">{t('forms.newForm')}</a> : null}
-      </div>
-      <div class="card">
-        {forms.length === 0 ? (
-          <div class="muted" style="text-align:center;padding:30px;font-size:13px;line-height:1.6">
-            {canManageForms ? (
-              <>
-                <div>{t('forms.emptyManage')}</div>
-                <div style="margin-top:10px">
-                  <a class="btn" href="/admin/content/form/new">{t('forms.createFirst')}</a>
-                </div>
-                <div style="margin-top:14px;font-size:12px;color:var(--mut)">
-                  {(() => {
-                    const parts = t('forms.manageHint').split('{endpoint}');
-                    return <>{parts[0]}<code style="background:var(--panel2);padding:2px 6px;border-radius:4px">POST /api/v1/forms/&lt;slug&gt;/submit</code>{parts[1] ?? ''}</>;
-                  })()}
-                  <br />{t('forms.manageHintNote')}
-                </div>
-              </>
-            ) : (
-              <>
-                <div>{t('forms.emptyNoManage')}</div>
-                <div style="margin-top:10px;font-size:12px">
-                  {t('forms.noManageHint')}
-                </div>
-              </>
-            )}
-          </div>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>{t('forms.colTitle')}</th>
-                <th>{t('forms.colSlug')}</th>
-                <th>{t('forms.colStatus')}</th>
-                <th>{t('forms.colSubmissions')}</th>
-                <th>{t('forms.colSpam')}</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {forms.map((f) => {
-                const cnt = cMap.get(f.id);
-                return (
-                  <tr>
-                    <td><a href={`/admin/forms/${f.slug}`}>{f.title}</a></td>
-                    <td class="muted">{f.slug}</td>
-                    <td><StatusBadge status={f.status} t={t} /></td>
-                    <td>{cnt ? cnt.total : 0}</td>
-                    <td class="muted">{cnt?.spam ?? 0}</td>
-                    <td>{canManageForms ? <a class="muted" style="font-size:12px" href={`/admin/content/form/${f.id}`}>{t('forms.editDefinition')}</a> : null}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
-      </div>
-      <div class="muted" style="font-size:12px;margin-top:10px;line-height:1.6">
-        {t('forms.fetchHint')}
-        {' '}<code style="background:var(--panel2);padding:2px 6px;border-radius:4px">GET /api/v1/forms/&lt;slug&gt;/submissions</code>
-        {' '}({t('forms.fetchHintCap', { cap: 'manageForms' })}).
-      </div>
-    </AdminPage>,
-  );
-});
-
-adminScreens.get('/forms/:slug', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  const t = getT(c);
-  // Submissions carry PII (names, emails, IPs) — same gate as the /forms index.
-  if (!need(c, auth, 'viewSubmissions') && !need(c, auth, 'manageForms')) {
-    return c.html(<AdminPage title={t('common.forbidden')} t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('common.forbidden')}</AdminPage>, 403);
-  }
-  const slug = c.req.param('slug');
-  const includeSpam = c.req.query('spam') === '1';
-
-  const form = await queryOne<{ id: number; slug: string; title: string; status: string }>(
-    `SELECT \`id\`, \`slug\`, \`title\`, \`status\`
-       FROM \`content\` WHERE \`typeSlug\` = 'form' AND \`slug\` = ? LIMIT 1`,
-    [slug],
-  );
-  if (!form) return c.html(<AdminPage title="404" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('forms.notFound')}</AdminPage>, 404);
-
-  const subs = await query<{ id: number; data: unknown; ip: string | null; isSpam: number; createdAt: unknown }>(
-    `SELECT \`id\`, \`data\`, \`ip\`, \`isSpam\`, \`createdAt\`
-       FROM \`formSubmissions\`
-      WHERE \`formId\` = ? ${includeSpam ? '' : 'AND `isSpam` = 0'}
-      ORDER BY \`createdAt\` DESC LIMIT 200`,
-    [form.id],
-  );
-  const totalSpam = (await queryOne<{ n: number }>(
-    'SELECT COUNT(*) AS n FROM `formSubmissions` WHERE `formId` = ? AND `isSpam` = 1',
-    [form.id],
-  ))?.n ?? 0;
-
-  return c.html(
-    <AdminPage title={t('forms.detailTitle', { title: form.title })} active="forms" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
-      <div class="top">
-        <h1>{form.title} <span class="muted" style="font-size:14px;font-weight:400">· {t.plural('forms.submissionsCount', subs.length)}</span></h1>
-        <div style="display:flex;gap:8px">
-          <a class="btn sec" href="/admin/forms">{t('forms.allForms')}</a>
-          <a class="btn sec" href={`/admin/content/form/${form.id}`}>{t('forms.editDefinitionPlain')}</a>
-        </div>
-      </div>
-      <div class="card" style="margin-bottom:14px;padding:10px 14px">
-        <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px">
-          <div class="muted">
-            {t('forms.publicEndpoint')}{' '}
-            <code style="background:var(--panel2);padding:2px 6px;border-radius:4px">POST /api/v1/forms/{form.slug}/submit</code>
-          </div>
-          <div>
-            {includeSpam
-              ? <a class="muted" style="font-size:12px" href={`/admin/forms/${form.slug}`}>{t('forms.hideSpam')}</a>
-              : <a class="muted" style="font-size:12px" href={`/admin/forms/${form.slug}?spam=1`}>{t('forms.showSpam', { n: totalSpam })}</a>}
-          </div>
-        </div>
-      </div>
-      <div class="card">
-        {subs.length === 0 ? (
-          <div class="muted" style="text-align:center;padding:30px;font-size:13px">
-            {includeSpam ? t('forms.noSubmissions') : t('forms.noNonSpamSubmissions')}
-          </div>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th style="width:36%">{t('forms.colData')}</th>
-                <th>{t('forms.colIp')}</th>
-                <th>{t('forms.colReceived')}</th>
-                <th>{t('forms.colStatus')}</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {normalizeDates(subs).map((s) => {
-                const data = typeof s.data === 'string' ? (() => { try { return JSON.parse(s.data); } catch { return s.data; } })() : s.data;
-                return (
-                  <tr>
-                    <td>
-                      <pre style="margin:0;font-size:11px;background:var(--panel2);padding:8px;border-radius:4px;max-height:160px;overflow:auto;white-space:pre-wrap">
-                        {typeof data === 'object' ? JSON.stringify(data, null, 2) : String(data ?? '')}
-                      </pre>
-                    </td>
-                    <td class="muted" style="font-size:12px">{s.ip ?? '—'}</td>
-                    <td class="muted" style="font-size:12px">{String(s.createdAt).slice(0, 16).replace('T', ' ')}</td>
-                    <td>{s.isSpam ? <span class="badge b-arch">{t('forms.badgeSpam')}</span> : <span class="badge b-pub">{t('forms.badgeNew')}</span>}</td>
-                    <td>
-                      <form method="post" action={`/admin/forms/${form.slug}/submissions/${s.id}`} style="display:inline;margin:0">
-                        {!s.isSpam ? <button class="btn sm sec" name="action" value="mark-spam" style="margin-right:4px">{t('forms.markSpam')}</button> : null}
-                        <button class="btn sm sec" name="action" value="delete" style="color:var(--err)"
-                          onclick={'return confirm(' + JSON.stringify(t('forms.confirmDeleteSubmission')) + ')'}>{t('common.delete')}</button>
-                      </form>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
-      </div>
-    </AdminPage>,
-  );
-});
-
-adminScreens.post('/forms/:slug/submissions/:id{[0-9]+}', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  if (!need(c, auth, 'manageForms')) return c.redirect(`/admin/forms/${c.req.param('slug')}`, 302);
-  const slug = c.req.param('slug');
-  const id = Number(c.req.param('id'));
-  const body = await c.req.parseBody();
-  if (body.action === 'mark-spam') {
-    await execute('UPDATE `formSubmissions` SET `isSpam` = 1 WHERE `id` = ?', [id]);
-  } else if (body.action === 'delete') {
-    await execute('DELETE FROM `formSubmissions` WHERE `id` = ?', [id]);
-  }
-  return c.redirect(`/admin/forms/${slug}`, 302);
-});
-
-// ── Users ──────────────────────────────────────────────────────────────
-
-adminScreens.get('/users', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  const t = getT(c);
-  const users = await query<{
-    id: number; email: string; displayName: string; status: string; roleSlug: string; lastLoginAt: unknown;
-  }>(
-    `SELECT u.\`id\`,u.\`email\`,u.\`displayName\`,u.\`status\`,u.\`lastLoginAt\`,
-            r.\`slug\` roleSlug
-       FROM \`users\` u LEFT JOIN \`roles\` r ON r.\`id\`=u.\`roleId\` ORDER BY u.\`id\``,
-  );
-  const roles = await listRoles();
-  const flash = c.req.query('ok');
-  return c.html(
-    <AdminPage title={t('users.title')} active="users" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
-      <div class="top">
-        <h1>{t('users.title')}</h1>
-      </div>
-      {flash ? <div class="ok">{flash}</div> : null}
-      <div class="card">
-        <table>
-          <thead>
-            <tr>
-              <th>{t('users.colEmail')}</th>
-              <th>{t('users.colName')}</th>
-              <th>{t('users.colRole')}</th>
-              <th>{t('users.colStatus')}</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {normalizeDates(users).map((u) => (
-              <tr>
-                <td>{u.email}</td>
-                <td>{u.displayName}</td>
-                <td class="muted">{u.roleSlug}</td>
-                <td>{u.status}</td>
-                <td>
-                  {u.id !== auth.user.id ? (
-                    <form method="post" action={`/admin/users/${u.id}/toggle`} style="margin:0">
-                      <button class="btn sec sm" type="submit">
-                        {u.status === 'suspended' ? t('users.unsuspend') : t('users.suspend')}
-                      </button>
-                    </form>
-                  ) : (
-                    <span class="muted">{t('common.you')}</span>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div class="card" style="margin-top:16px">
-        <h3 style="margin-top:0">{t('users.inviteTitle')}</h3>
-        <form method="post" action="/admin/users">
-          <div class="grid g3">
-            <div>
-              <label>{t('users.email')}</label>
-              <input type="email" name="email" required />
-            </div>
-            <div>
-              <label>{t('users.displayName')}</label>
-              <input type="text" name="displayName" required />
-            </div>
-            <div>
-              <label>{t('users.role')}</label>
-              <select name="roleSlug">
-                {roles.map((r) => (
-                  <option value={r.slug}>{r.label}</option>
-                ))}
-              </select>
-            </div>
-          </div>
-          <div style="margin-top:14px">
-            <button class="btn" type="submit">
-              {t('users.sendInvite')}
-            </button>
-          </div>
-        </form>
-      </div>
-    </AdminPage>,
-  );
-});
-
-adminScreens.post('/users', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  const t = getT(c);
-  if (!need(c, auth, 'manageUsers')) return c.redirect('/admin/users?ok=' + encodeURIComponent(t('users.flashForbidden')), 302);
-  const b = await c.req.parseBody();
-  const email = String(b.email ?? '').toLowerCase().trim();
-  const displayName = String(b.displayName ?? '').trim();
-  const role = await findRoleBySlug(String(b.roleSlug ?? 'viewer'));
-  if (!email || !displayName || !role) return c.redirect('/admin/users?ok=' + encodeURIComponent(t('users.flashInvalidInput')), 302);
-  const dup = await queryOne<{ id: number }>('SELECT `id` FROM `users` WHERE `email`=?', [email]);
-  if (dup) return c.redirect('/admin/users?ok=' + encodeURIComponent(t('users.flashEmailUsed')), 302);
-  const tok = Array.from(crypto.getRandomValues(new Uint8Array(32)), (x) => x.toString(16).padStart(2, '0')).join('');
-  const ph = await hashPassword(tok); // unusable until invite accepted
-  await execute(
-    `INSERT INTO \`users\` (\`email\`,\`passwordHash\`,\`displayName\`,\`roleId\`,\`status\`,\`inviteToken\`,\`inviteExpiresAt\`)
-     VALUES (?,?,?,?,'invited',?, (NOW() + INTERVAL 7 DAY))`,
-    [email, ph, displayName, role.id, tok],
-  );
-  const { enqueue } = await import('../jobs/queue.js');
-  await enqueue('sendEmail', {
-    templateSlug: 'userInvite',
-    to: email,
-    variables: { siteName: 'Skelpo CMS', inviteUrl: `/admin/accept-invite?token=${tok}` },
-  });
-  return c.redirect('/admin/users?ok=' + encodeURIComponent(t('users.flashInviteSent')), 302);
-});
-
-adminScreens.post('/users/:id/toggle', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  const t = getT(c);
-  if (!need(c, auth, 'manageUsers')) return c.redirect('/admin/users?ok=' + encodeURIComponent(t('users.flashForbidden')), 302);
-  const id = Number(c.req.param('id'));
-  if (id === auth.user.id) return c.redirect('/admin/users?ok=' + encodeURIComponent(t('users.flashCannotChangeSelf')), 302);
-  const u = await queryOne<{ status: string }>('SELECT `status` FROM `users` WHERE `id`=?', [id]);
-  if (!u) return c.redirect('/admin/users?ok=' + encodeURIComponent(t('users.flashNotFound')), 302);
-  const next = u.status === 'suspended' ? 'active' : 'suspended';
-  await execute('UPDATE `users` SET `status`=? WHERE `id`=?', [next, id]);
-  if (next === 'suspended') await execute('DELETE FROM `sessions` WHERE `userId`=?', [id]);
-  return c.redirect('/admin/users?ok=' + encodeURIComponent(t('users.flashUpdated')), 302);
-});
-
-// ── Redirects ──────────────────────────────────────────────────────────
-
-adminScreens.get('/redirects', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  const t = getT(c);
-  const rows = await query<{ id: number; source: string; destination: string; statusCode: number; hitCount: number }>(
-    'SELECT `id`,`source`,`destination`,`statusCode`,`hitCount` FROM `redirects` ORDER BY `id` DESC',
-  );
-  return c.html(
-    <AdminPage title={t('redirects.title')} active="redirects" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
-      <div class="top">
-        <h1>{t('redirects.title')}</h1>
-      </div>
-      <div class="card">
-        <form method="post" action="/admin/redirects" class="row" style="gap:8px;align-items:end;flex-wrap:wrap">
-          <div style="flex:1;min-width:160px">
-            <label>{t('redirects.source')}</label>
-            <input type="text" name="source" placeholder={t('redirects.sourcePlaceholder')} required />
-          </div>
-          <div style="flex:1;min-width:160px">
-            <label>{t('redirects.destination')}</label>
-            <input type="text" name="destination" placeholder={t('redirects.destinationPlaceholder')} required />
-          </div>
-          <div style="width:110px">
-            <label>{t('redirects.code')}</label>
-            <select name="statusCode">
-              <option>301</option>
-              <option>302</option>
-              <option>307</option>
-              <option>308</option>
-            </select>
-          </div>
-          <button class="btn" type="submit">
-            {t('redirects.add')}
-          </button>
-        </form>
-      </div>
-      <div class="card" style="margin-top:16px">
-        <table>
-          <thead>
-            <tr>
-              <th>{t('redirects.colSource')}</th>
-              <th>{t('redirects.colDestination')}</th>
-              <th>{t('redirects.colCode')}</th>
-              <th>{t('redirects.colHits')}</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr>
-                <td>{r.source}</td>
-                <td class="muted">{r.destination}</td>
-                <td>{r.statusCode}</td>
-                <td class="muted">{r.hitCount}</td>
-                <td>
-                  <form method="post" action={`/admin/redirects/${r.id}/delete`} style="margin:0">
-                    <button class="btn sec sm" type="submit">
-                      {t('common.delete')}
-                    </button>
-                  </form>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </AdminPage>,
-  );
-});
-
-adminScreens.post('/redirects', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  if (!need(c, auth, 'manageRedirects')) return c.redirect('/admin/redirects', 302);
-  const b = await c.req.parseBody();
-  const source = String(b.source ?? '').trim();
-  const destination = String(b.destination ?? '').trim();
-  const statusCode = Number(b.statusCode ?? 301);
-  if (source && destination) {
-    await execute(
-      'INSERT INTO `redirects` (`source`,`destination`,`statusCode`) VALUES (?,?,?) ' +
-        'ON DUPLICATE KEY UPDATE `destination`=VALUES(`destination`),`statusCode`=VALUES(`statusCode`)',
-      [source, destination, statusCode],
-    );
-    invalidate(['redirects', 'GET:/redirects'], { prefix: true });
-  }
-  return c.redirect('/admin/redirects', 302);
-});
-
-adminScreens.post('/redirects/:id/delete', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  if (!need(c, auth, 'manageRedirects')) return c.redirect('/admin/redirects', 302);
-  await execute('DELETE FROM `redirects` WHERE `id`=?', [Number(c.req.param('id'))]);
-  invalidate(['redirects', 'GET:/redirects'], { prefix: true });
-  return c.redirect('/admin/redirects', 302);
-});
-
-// ── Menus ──────────────────────────────────────────────────────────────
-
-adminScreens.get('/menus', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  const t = getT(c);
-  const menus = await listMenus();
-  const sel = c.req.query('m') ?? menus[0]?.slug ?? 'main';
-  const tree = await getMenuTree(sel, 'en', 'en');
-  return c.html(
-    <AdminPage title={t('menus.title')} active="menus" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
-      <div class="top">
-        <h1>{t('menus.title')}</h1>
-        <div class="row">
-          {menus.map((m) => (
-            <a class={`btn sm ${m.slug === sel ? '' : 'sec'}`} href={`/admin/menus?m=${m.slug}`}>
-              {m.label}
-            </a>
-          ))}
-        </div>
-      </div>
-      <div class="card">
-        <h3 style="margin-top:0">{t('menus.itemsHeading', { slug: sel })}</h3>
-        <table>
-          <thead>
-            <tr>
-              <th>{t('menus.colLabel')}</th>
-              <th>{t('menus.colUrl')}</th>
-              <th>{t('menus.colOrder')}</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {(tree?.items ?? []).map((i) => (
-              <tr>
-                <td>{i.label}</td>
-                <td class="muted">{i.url ?? t('menus.contentLink')}</td>
-                <td>{i.sortOrder}</td>
-                <td>
-                  <form method="post" action={`/admin/menus/${sel}/items/${i.id}/delete`} style="margin:0">
-                    <button class="btn sec sm" type="submit">
-                      {t('common.delete')}
-                    </button>
-                  </form>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div class="card" style="margin-top:16px">
-        <h3 style="margin-top:0">{t('menus.addItem', { slug: sel })}</h3>
-        <form method="post" action={`/admin/menus/${sel}/items`} class="row" style="gap:8px;align-items:end;flex-wrap:wrap">
-          <div style="flex:1;min-width:140px">
-            <label>{t('menus.label')}</label>
-            <input type="text" name="label" required />
-          </div>
-          <div style="flex:1;min-width:140px">
-            <label>{t('menus.url')}</label>
-            <input type="text" name="url" placeholder={t('menus.urlPlaceholder')} required />
-          </div>
-          <div style="width:90px">
-            <label>{t('menus.order')}</label>
-            <input type="number" name="sortOrder" value="0" />
-          </div>
-          <button class="btn" type="submit">
-            {t('menus.add')}
-          </button>
-        </form>
-      </div>
-    </AdminPage>,
-  );
-});
-
-adminScreens.post('/menus/:slug/items', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  if (!need(c, auth, 'manageMenus')) return c.redirect('/admin/menus', 302);
-  const slug = c.req.param('slug');
-  const b = await c.req.parseBody();
-  const label = String(b.label ?? '').trim();
-  const url = String(b.url ?? '').trim();
-  if (label && url) {
-    await addMenuItem(slug, { label: { en: label }, url, sortOrder: Number(b.sortOrder ?? 0) });
-    invalidate([`menu:${slug}`], { prefix: true });
-  }
-  return c.redirect(`/admin/menus?m=${slug}`, 302);
-});
-
-adminScreens.post('/menus/:slug/items/:id/delete', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  if (!need(c, auth, 'manageMenus')) return c.redirect('/admin/menus', 302);
-  const slug = c.req.param('slug');
-  await deleteMenuItem(Number(c.req.param('id')));
-  invalidate([`menu:${slug}`], { prefix: true });
-  return c.redirect(`/admin/menus?m=${slug}`, 302);
-});
-
-// ── Jobs (read-only + retry) ───────────────────────────────────────────
-
-adminScreens.get('/jobs', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  const stats = await jobStats();
-  const recent = await query<{ id: number; kind: string; status: string; attempts: number; lastError: string | null; createdAt: unknown }>(
-    'SELECT `id`,`kind`,`status`,`attempts`,`lastError`,`createdAt` FROM `jobs` ORDER BY `id` DESC LIMIT 30',
-  );
-  const t = getT(c);
-  return c.html(
-    <AdminPage title={t('jobs.title')} active="jobs" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
-      <div class="top">
-        <h1>{t('jobs.title')}</h1>
-        <span class="muted">
-          {Object.entries(stats).map(([k, v]) => `${k}: ${v}`).join('  ·  ') || t('common.idle')}
-        </span>
-      </div>
-      <div class="card">
-        <table>
-          <thead>
-            <tr>
-              <th>{t('jobs.colId')}</th>
-              <th>{t('jobs.colKind')}</th>
-              <th>{t('jobs.colStatus')}</th>
-              <th>{t('jobs.colAttempts')}</th>
-              <th>{t('jobs.colError')}</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {normalizeDates(recent).map((j) => (
-              <tr>
-                <td>{j.id}</td>
-                <td>{j.kind}</td>
-                <td>{j.status}</td>
-                <td>{j.attempts}</td>
-                <td class="muted" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-                  {j.lastError ?? ''}
-                </td>
-                <td>
-                  {j.status === 'failed' || j.status === 'dead' ? (
-                    <form method="post" action={`/admin/jobs/${j.id}/retry`} style="margin:0">
-                      <button class="btn sec sm" type="submit">
-                        {t('jobs.retry')}
-                      </button>
-                    </form>
-                  ) : null}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </AdminPage>,
-  );
-});
-
-adminScreens.post('/jobs/:id/retry', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  if (!need(c, auth, 'manageJobs')) return c.redirect('/admin/jobs', 302);
-  await retryJob(Number(c.req.param('id')));
-  return c.redirect('/admin/jobs', 302);
-});
-
-// ── Webhooks ───────────────────────────────────────────────────────────
-
-adminScreens.get('/webhooks', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  const t = getT(c);
-  const hooks = await listWebhooks();
-  const flash = c.req.query('ok');
-  return c.html(
-    <AdminPage title={t('webhooks.title')} active="webhooks" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
-      <div class="top">
-        <h1>{t('webhooks.title')}</h1>
-      </div>
-      {flash ? <div class="ok">{decodeURIComponent(flash)}</div> : null}
-      <div class="card">
-        <table>
-          <thead>
-            <tr>
-              <th>{t('webhooks.colUrl')}</th>
-              <th>{t('webhooks.colEvents')}</th>
-              <th>{t('webhooks.colActive')}</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {hooks.map((h) => (
-              <tr>
-                <td>{h.url}</td>
-                <td class="muted">{h.events.join(', ')}</td>
-                <td>{h.active ? t('webhooks.activeYes') : t('webhooks.activeNo')}</td>
-                <td>
-                  <form method="post" action={`/admin/webhooks/${h.id}/delete`} style="margin:0">
-                    <button class="btn sec sm" type="submit">
-                      {t('common.delete')}
-                    </button>
-                  </form>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div class="card" style="margin-top:16px">
-        <h3 style="margin-top:0">{t('webhooks.addTitle')}</h3>
-        <form method="post" action="/admin/webhooks">
-          <label>{t('webhooks.url')}</label>
-          <input type="url" name="url" required placeholder={t('webhooks.urlPlaceholder')} />
-          <label>{t('webhooks.events')}</label>
-          <input
-            type="text"
-            name="events"
-            value="content.published,content.updated,content.unpublished,menu.updated,setting.changed"
-          />
-          <div style="margin-top:14px">
-            <button class="btn" type="submit">
-              {t('webhooks.add')}
-            </button>
-          </div>
-        </form>
-      </div>
-    </AdminPage>,
-  );
-});
-
-adminScreens.post('/webhooks', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  const t = getT(c);
-  if (!need(c, auth, 'manageSettings')) return c.redirect('/admin/webhooks?ok=' + encodeURIComponent(t('webhooks.flashForbidden')), 302);
-  const b = await c.req.parseBody();
-  const url = String(b.url ?? '').trim();
-  const events = String(b.events ?? '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (url && events.length) {
-    const { secret } = await createWebhook({ url, events });
-    return c.redirect('/admin/webhooks?ok=' + encodeURIComponent(t('webhooks.flashCreated', { secret })), 302);
-  }
-  return c.redirect('/admin/webhooks?ok=' + encodeURIComponent(t('webhooks.flashInvalidInput')), 302);
-});
-
-adminScreens.post('/webhooks/:id/delete', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  const t = getT(c);
-  if (!need(c, auth, 'manageSettings')) return c.redirect('/admin/webhooks', 302);
-  await deleteWebhook(Number(c.req.param('id')));
-  return c.redirect('/admin/webhooks?ok=' + encodeURIComponent(t('webhooks.flashDeleted')), 302);
+  const keyName = decodeURIComponent(c.req.param('keyName'));
+  await deleteSetting(keyName);
+  invalidate([`setting:${keyName}`]);
+  invalidateSettingsCache();
+  invalidate(['settings:all']);
+  void fireEvent('setting.changed', { key: keyName, deleted: true }, [`setting:${keyName}`, 'settings:all']);
+  return c.redirect('/admin/settings?tab=advanced&ok=' + encodeURIComponent(t('content.flashSaved')), 302);
 });

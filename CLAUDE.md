@@ -50,7 +50,7 @@ HTTP → Hono (src/app.ts) → routes → cache (dep-graph) → DB (@perryts/mys
 | `src/server.ts` | Boot: migrate-check, build app, bind listener |
 | `src/app.ts` | Hono app assembly + middleware order |
 | `src/routes/api/` | `/api/v1` REST surface (content, settings, menus, media, forms, users, roles, redirects, webhooks, jobs, auth, types) |
-| `src/admin/` | Server-rendered admin (layout/screens/routes/contentEditor). HTMX, no SPA |
+| `src/admin/` | Server-rendered admin, no SPA. `layout` (shell, sidebar), `routes` (login, dashboard), `contentRoutes` + `contentEditor` (lists, editor, trash, revisions), `account` (invites, password reset, profile, users, API tokens), `screens` (settings), `siteScreens` (media, menus, forms, redirects, webhooks, jobs), `typeScreens` (field builder), `qr` (dependency-free QR SVG for 2FA setup), `helpers`. The body editor stores Markdown; its visual mode is Toast UI Editor vendored in `assets/tui/`, loaded on demand, and falls back to Markdown mode for text it cannot round-trip (raw HTML, MDX, footnotes, forced line breaks). Two-step sign-in is TOTP (`src/auth/totp.ts`, columns `users.totpSecret`/`totpVerified`); to recover a locked-out account: `UPDATE users SET totpSecret=NULL, totpVerified=0 WHERE email=…`. Every UI string goes through `i18n/messages/*` — all 13 locales must carry the same keys (unit-tested) |
 | `src/content/` | Content read/write, content-type defs, schema evolution (lazy migration) |
 | `src/cache/` | LRU + dependency-graph invalidation + ETag + respond helpers |
 | `src/auth/` | Sessions (DB-backed), password (bcryptjs), TOTP tokens, rate-limit, users |

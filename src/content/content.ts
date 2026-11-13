@@ -60,7 +60,7 @@ function parseJson<T>(v: T | string, fallback: T): T {
  * Compute the public URL for a row using its content type's urlPattern.
  * Returns null for non-routable types or missing patterns.
  */
-function computeUrl(row: ContentDbRow, type: ContentTypeRow, defaultLocale: string): string | null {
+export function computeUrl(row: Pick<ContentDbRow, 'slug' | 'locale'>, type: ContentTypeRow, defaultLocale: string): string | null {
   if (!type.isRoutable || !type.urlPattern) return null;
   let path = type.urlPattern.replace(':slug', row.slug);
   // Other tokens not handled in v0.1; future: :year, :month, :id, custom segments.

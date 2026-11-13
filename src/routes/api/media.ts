@@ -9,6 +9,7 @@ import {
   deleteMedia,
   readMediaBytes,
   mediaPublicUrl,
+  isReplacedKey,
 } from '../../media/store.js';
 import { signedImgproxyUrl, type TransformOpts } from '../../media/imgproxy.js';
 import { getSiteUrl } from '../../settings/store.js';
@@ -71,6 +72,14 @@ mediaRoutes.get('/:id{[0-9]+}/raw', async (c) => {
   // 302-redirect there so the CMS stays out of the byte path.
   const direct = mediaPublicUrl(m);
   if (direct) return c.redirect(direct, 302);
+  // A replaced file keeps its URL, so it cannot be cached forever: caches
+  // revalidate against the ETag (which changes with every replacement).
+  const replaced = isReplacedKey(m.storageKey);
+  const etag = `"${m.storageKey.replace(/[^a-zA-Z0-9._-]/g, '-')}"`;
+  const cacheControl = replaced ? 'public, max-age=300, must-revalidate' : 'public, max-age=31536000, immutable';
+  if (replaced && c.req.header('if-none-match') === etag) {
+    return new Response(null, { status: 304, headers: { ETag: etag, 'Cache-Control': cacheControl } });
+  }
   const bytes = await readMediaBytes(m);
   const safeName = (m.filename || 'download').replace(/[^\w.\- ]+/g, '_').slice(0, 128);
   const disposition = INLINE_SAFE.test(m.mimeType) ? 'inline' : `attachment; filename="${safeName}"`;
@@ -81,7 +90,8 @@ mediaRoutes.get('/:id{[0-9]+}/raw', async (c) => {
       // force non-image/av/pdf content to download rather than render inline.
       'X-Content-Type-Options': 'nosniff',
       'Content-Disposition': disposition,
-      'Cache-Control': 'public, max-age=31536000, immutable',
+      'Cache-Control': cacheControl,
+      ETag: etag,
       'Content-Length': String(m.sizeBytes),
     },
   });

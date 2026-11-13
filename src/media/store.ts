@@ -130,13 +130,24 @@ export function mediaPublicUrl(row: MediaRow): string | null {
   return mediaStorage().publicUrl(row.storageKey);
 }
 
-export async function listMedia(opts: { mimeType?: string; limit?: number } = {}): Promise<MediaRow[]> {
-  const limit = Math.min(opts.limit ?? 50, 200);
-  const where = opts.mimeType ? 'WHERE `mimeType` LIKE ?' : '';
-  const params: unknown[] = opts.mimeType ? [`${opts.mimeType}%`] : [];
-  params.push(limit);
+function mediaFilter(opts: { mimeType?: string; q?: string }): { where: string; params: unknown[] } {
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  if (opts.mimeType) { clauses.push('`mimeType` LIKE ?'); params.push(`${opts.mimeType}%`); }
+  if (opts.q) {
+    const like = `%${opts.q.replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
+    clauses.push('(`filename` LIKE ? OR CAST(`altText` AS CHAR) LIKE ?)');
+    params.push(like, like);
+  }
+  return { where: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', params };
+}
+
+export async function listMedia(opts: { mimeType?: string; q?: string; limit?: number; offset?: number } = {}): Promise<MediaRow[]> {
+  const limit = Math.min(Math.max(Math.trunc(opts.limit ?? 50), 1), 200);
+  const offset = Math.max(Math.trunc(opts.offset ?? 0), 0);
+  const { where, params } = mediaFilter(opts);
   const rows = await query<MediaRow>(
-    `SELECT * FROM \`media\` ${where} ORDER BY \`id\` DESC LIMIT ?`,
+    `SELECT * FROM \`media\` ${where} ORDER BY \`id\` DESC LIMIT ${limit} OFFSET ${offset}`,
     params,
   );
   return rows.map((r) => ({
@@ -144,6 +155,12 @@ export async function listMedia(opts: { mimeType?: string; limit?: number } = {}
     altText: parseJson<Record<string, string>>(r.altText, {}),
     focalPoint: r.focalPoint ? parseJson<{ x: number; y: number }>(r.focalPoint, { x: 0.5, y: 0.5 }) : null,
   }));
+}
+
+export async function countMedia(opts: { mimeType?: string; q?: string } = {}): Promise<number> {
+  const { where, params } = mediaFilter(opts);
+  const row = await queryOne<{ n: number }>(`SELECT COUNT(*) AS n FROM \`media\` ${where}`, params);
+  return Number(row?.n ?? 0);
 }
 
 export async function updateMedia(
@@ -170,4 +187,35 @@ export async function deleteMedia(id: number): Promise<boolean> {
     return true;
   }
   return false;
+}
+
+// Keys of replaced files carry this marker so the byte route knows the URL
+// no longer maps to one immutable file and must be revalidated by caches.
+const REPLACED_MARK = 'r-';
+
+export function isReplacedKey(storageKey: string): boolean {
+  return (storageKey.split('/').pop() ?? '').startsWith(REPLACED_MARK);
+}
+
+/**
+ * Swap the bytes behind an existing media row. The id — and with it every
+ * link and reference — stays the same; alt text and focal point are kept.
+ */
+export async function replaceMediaFile(
+  id: number,
+  input: { filename: string; mimeType: string; bytes: Uint8Array },
+): Promise<MediaRow | null> {
+  const existing = await getMedia(id);
+  if (!existing) return null;
+  const ym = new Date().toISOString().slice(0, 7).replace('-', '');
+  const key = `${ym}/${REPLACED_MARK}${randomHex(8)}-${sanitize(input.filename)}`;
+  await mediaStorage().put(key, input.bytes, input.mimeType);
+  const { w, h } = sniffDimensions(input.bytes, input.mimeType);
+  await execute(
+    'UPDATE `media` SET `filename`=?, `mimeType`=?, `sizeBytes`=?, `storageKey`=?, `width`=?, `height`=? WHERE `id`=?',
+    [input.filename, input.mimeType, input.bytes.length, key, w, h, id],
+  );
+  // The old bytes are unreachable now; a failed cleanup must not undo the swap.
+  await mediaStorage().delete(existing.storageKey).catch(() => undefined);
+  return getMedia(id);
 }

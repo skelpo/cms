@@ -52,7 +52,7 @@ export function isValidSlug(s: string): boolean {
 // Field validation against the type's schema
 // ────────────────────────────────────────────────────────────────────────
 
-function validateFields(fields: Record<string, unknown>, defs: FieldDef[]): ValidationError[] {
+export function validateFields(fields: Record<string, unknown>, defs: FieldDef[]): ValidationError[] {
   const errors: ValidationError[] = [];
   for (const def of defs) {
     const v = fields[def.name];
@@ -293,6 +293,19 @@ export async function deleteContent(id: number, hard = false): Promise<boolean> 
     return r.affectedRows > 0;
   }
   const r = await execute("UPDATE `content` SET `status` = 'archived' WHERE `id` = ?", [id]);
+  return r.affectedRows > 0;
+}
+
+/** Bring a soft-deleted (archived) row back as a draft. */
+export async function restoreContent(id: number, authorId: number): Promise<boolean> {
+  const r = await execute(
+    "UPDATE `content` SET `status` = 'draft', `scheduledAt` = NULL, `revision` = `revision` + 1 WHERE `id` = ? AND `status` = 'archived'",
+    [id],
+  );
+  if (r.affectedRows > 0) {
+    const updated = await queryOne<ContentDbRow>('SELECT * FROM `content` WHERE `id` = ?', [id]);
+    if (updated) await saveRevision(id, updated.revision, authorId, 'restore', updated);
+  }
   return r.affectedRows > 0;
 }
 
