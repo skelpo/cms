@@ -42,3 +42,20 @@ adminStatic.get('/easymde/easymde.min.css', async (c) => {
   c.header('Cache-Control', 'public, max-age=31536000, immutable');
   return c.body(body);
 });
+
+// Visual (WYSIWYG) editor, loaded on demand by the content editor.
+const TUI_FILES: Record<string, string> = {
+  'toastui-editor-all.min.js': 'application/javascript; charset=utf-8',
+  'toastui-editor.min.css': 'text/css; charset=utf-8',
+  'toastui-editor-dark.css': 'text/css; charset=utf-8',
+};
+
+adminStatic.get('/tui/:file', async (c) => {
+  const file = c.req.param('file');
+  const type = TUI_FILES[file];
+  if (!type) return c.notFound();
+  const { body } = await load(`tui/${file}`, type);
+  c.header('Content-Type', type);
+  c.header('Cache-Control', 'public, max-age=31536000, immutable');
+  return c.body(body);
+});

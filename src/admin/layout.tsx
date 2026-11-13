@@ -11,14 +11,30 @@ import type { RoleCapabilities } from '../auth/users.js';
 import { can, type Action } from '../permissions/check.js';
 import { makeT, type Translator } from './i18n/index.js';
 import { adminLocales, adminLocaleNames, defaultAdminLocale } from './i18n/locales.js';
+import { getSetting } from '../settings/store.js';
 
 // Caps-aware sidebar items. Each entry knows what permission it needs;
 // the renderer drops items the current user can't action on.
-function visibleTypes(allCaps: RoleCapabilities, types: { slug: string; labelPlural: string }[]): { slug: string; label: string }[] {
+/** Types that never appear in the Content section (they have their own screens). */
+const INTERNAL_TYPES = ['form', 'errorPage'];
+const BUILTIN_NAV_KEYS: Record<string, string> = { page: 'nav.pages', post: 'nav.posts', doc: 'nav.docs' };
+
+function visibleTypes(
+  allCaps: RoleCapabilities,
+  types: { slug: string; labelPlural: string }[],
+  hidden: string[],
+  tr: Translator,
+): { slug: string; label: string }[] {
   return types
-    .filter((t) => !['page', 'post', 'doc', 'form', 'errorPage'].includes(t.slug))
+    .filter((t) => !INTERNAL_TYPES.includes(t.slug) && !hidden.includes(t.slug))
     .filter((t) => can({ userId: 0, caps: allCaps }, 'read', t.slug))
-    .map((t) => ({ slug: t.slug, label: t.labelPlural }));
+    .map((t) => ({ slug: t.slug, label: BUILTIN_NAV_KEYS[t.slug] ? tr(BUILTIN_NAV_KEYS[t.slug]!) : t.labelPlural }));
+}
+
+/** Content types hidden from the sidebar/dashboard (setting `admin.hiddenTypes`). */
+export async function getHiddenTypes(): Promise<string[]> {
+  const v = await getSetting<unknown>('admin.hiddenTypes', []).catch(() => []);
+  return Array.isArray(v) ? v.map(String) : [];
 }
 
 function has(caps: RoleCapabilities, action: Action, typeSlug?: string): boolean {
@@ -43,7 +59,7 @@ a{color:var(--acc2);text-decoration:none}a:hover{text-decoration:underline}
 .nav a{display:block;padding:8px 10px;border-radius:7px;color:var(--mut);font-weight:500}
 .nav a:hover{background:var(--panel2);color:var(--ink);text-decoration:none}
 .nav a.on{background:var(--panel2);color:var(--acc2)}
-.nav .sec{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#5b616e;padding:14px 10px 4px}
+.nav .sec{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);padding:14px 10px 4px}
 .main{padding:26px 32px;overflow:auto}
 .top{display:flex;align-items:center;justify-content:space-between;margin-bottom:22px}
 .top h1{font-size:20px;margin:0}
@@ -78,6 +94,96 @@ padding:10px 12px;border-radius:7px;margin:10px 0;font-size:13px}
 .login{max-width:360px;margin:12vh auto}
 .login .card{padding:26px}
 .htmx-indicator{opacity:0;transition:opacity .15s}.htmx-request .htmx-indicator{opacity:1}
+.btn.dis{opacity:.4;pointer-events:none}
+.btn.danger{background:transparent;color:var(--err);border:1px solid var(--line)}
+.btn.danger:hover{background:rgba(248,113,113,.12)}
+.linkbtn{background:none;border:0;padding:0;color:var(--acc2);cursor:pointer;font:inherit}
+.linkbtn:hover{text-decoration:underline}
+.linkbtn.danger{color:var(--err)}
+.help{font-size:12px;color:var(--mut);margin-top:5px;line-height:1.45}
+.counter{float:right;font-weight:400;font-variant-numeric:tabular-nums}
+.counter.bad{color:var(--err)}.counter.good{color:var(--ok)}
+.pager{display:flex;align-items:center;gap:10px;justify-content:flex-end;margin-top:14px;font-size:12px}
+.tabs{display:flex;gap:2px;flex-wrap:wrap;border-bottom:1px solid var(--line);margin-bottom:18px}
+.tabs a{padding:9px 14px;color:var(--mut);font-weight:600;font-size:13px;border-bottom:2px solid transparent;margin-bottom:-1px}
+.tabs a:hover{color:var(--ink);text-decoration:none}
+.tabs a.on{color:var(--acc2);border-bottom-color:var(--acc2)}
+.subtabs{display:flex;gap:14px;flex-wrap:wrap;font-size:13px;margin-bottom:12px}
+.subtabs a{color:var(--mut)}.subtabs a.on{color:var(--ink);font-weight:600}
+.rowact{font-size:12px;margin-top:3px;display:flex;gap:10px;flex-wrap:wrap;opacity:.75}
+tr:hover .rowact{opacity:1}
+.rowact form{display:inline;margin:0}
+.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.toolbar input,.toolbar select{width:auto}
+.editor-grid{display:grid;gap:14px;grid-template-columns:minmax(0,2fr) minmax(260px,1fr);align-items:start}
+.stack{display:flex;flex-direction:column;gap:14px}
+.card h3{margin:0 0 4px;font-size:14px}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:13px}
+.kv dt{color:var(--mut)}.kv dd{margin:0;word-break:break-word}
+.check{display:flex;align-items:center;gap:8px;font-weight:400;margin:6px 0;color:var(--ink);cursor:pointer;font-size:13px}
+.check input,td input[type=checkbox],th input[type=checkbox]{width:auto}
+.secret{display:block;background:var(--panel2);border:1px solid var(--line);border-radius:7px;padding:10px 12px;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all;margin:8px 0}
+.sitelink{font-size:12px;padding:0 10px 12px;display:block}
+.nav details summary{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);padding:14px 10px 4px;cursor:pointer;list-style:none}
+.nav details summary::-webkit-details-marker{display:none}
+.nav details summary::after{content:' ▸'}.nav details[open] summary::after{content:' ▾'}
+.topbar{display:none}
+@media (max-width:860px){
+.app{grid-template-columns:1fr}
+.side{display:none;position:fixed;inset:0 20% 0 0;z-index:30;overflow:auto;box-shadow:0 0 0 100vmax rgba(0,0,0,.5)}
+body.nav-open .side{display:flex}
+.topbar{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:20}
+.topbar button{background:var(--panel2);border:1px solid var(--line);color:var(--ink);border-radius:6px;padding:5px 10px;font-size:16px;cursor:pointer}
+.main{padding:18px 14px}
+.g4,.g3,.g2,.editor-grid{grid-template-columns:1fr}
+.top{flex-wrap:wrap;gap:10px}
+.card{overflow-x:auto}
+}
+`;
+
+
+// Page-wide behaviour, inlined so every admin page gets it without a round-trip:
+//  • <time data-dt> is rewritten to the viewer's local time,
+//  • [data-confirm] asks before a destructive click,
+//  • [data-copy] copies its value to the clipboard,
+//  • form[data-guard] warns before leaving with unsaved changes.
+const SHELL_SCRIPT = `
+document.addEventListener('DOMContentLoaded',function(){
+  var icon=document.getElementById('skelpo-theme-icon');
+  if(icon)icon.textContent=document.documentElement.getAttribute('data-theme')==='light'?'☾':'☀';
+  var lang=document.documentElement.lang||undefined;
+  document.querySelectorAll('time[data-dt]').forEach(function(el){
+    var d=new Date(el.getAttribute('datetime'));if(isNaN(d))return;
+    try{
+      el.title=el.textContent;
+      el.textContent=el.getAttribute('data-dt')==='date'
+        ?d.toLocaleDateString(lang,{year:'numeric',month:'short',day:'numeric'})
+        :d.toLocaleString(lang,{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+    }catch(e){}
+  });
+  document.querySelectorAll('option[data-month]').forEach(function(el){
+    var p=el.getAttribute('data-month').split('-');var d=new Date(Number(p[0]),Number(p[1])-1,1);
+    try{el.textContent=d.toLocaleDateString(lang,{year:'numeric',month:'long'});}catch(e){}
+  });
+  var dirty=false;
+  document.querySelectorAll('form[data-guard]').forEach(function(f){
+    f.addEventListener('input',function(){dirty=true;});
+    f.addEventListener('change',function(){dirty=true;});
+    f.addEventListener('submit',function(){dirty=false;});
+  });
+  window.skelpoMarkDirty=function(){dirty=true;};
+  window.addEventListener('beforeunload',function(e){if(dirty){e.preventDefault();e.returnValue='';}});
+});
+document.addEventListener('click',function(e){
+  var t=e.target&&e.target.closest?e.target:null;if(!t)return;
+  var c=t.closest('[data-confirm]');
+  if(c&&!confirm(c.getAttribute('data-confirm'))){e.preventDefault();e.stopPropagation();return;}
+  var cp=t.closest('[data-copy]');
+  if(cp){e.preventDefault();var v=cp.getAttribute('data-copy');
+    (navigator.clipboard?navigator.clipboard.writeText(v):Promise.reject()).then(function(){
+      var o=cp.textContent;cp.textContent=cp.getAttribute('data-copied')||'✓';setTimeout(function(){cp.textContent=o;},1500);
+    }).catch(function(){prompt('',v);});}
+},true);
 `;
 
 export const AdminPage: FC<
@@ -97,101 +203,95 @@ export const AdminPage: FC<
   // Translator: always have one so chrome renders even on stub pages.
   const tr = t ?? makeT(defaultAdminLocale);
   const allTypes = user ? await listTypes().catch(() => []) : [];
-  const customTypes = visibleTypes(c, allTypes);
-  // Built-in editorial types only show if the user can read them.
-  const showPages = user && has(c, 'read', 'page');
-  const showPosts = user && has(c, 'read', 'post');
-  const showDocs  = user && has(c, 'read', 'doc');
+  const hiddenTypes = user ? await getHiddenTypes() : [];
+  const contentTypes = visibleTypes(c, allTypes, hiddenTypes, tr);
+  const siteNameRaw = await getSetting<unknown>('site.name', '').catch(() => '');
+  const siteName = typeof siteNameRaw === 'string' && siteNameRaw.trim() ? siteNameRaw.trim() : 'Skelpo CMS';
+  const siteUrlRaw = await getSetting<unknown>('site.url', '').catch(() => '');
+  const siteUrl = typeof siteUrlRaw === 'string' && /^https?:\/\//.test(siteUrlRaw) ? siteUrlRaw : '';
 
-  // Developer-only areas
   const canManageTypes     = user && has(c, 'manageTypes');
   const canManageMenus     = user && has(c, 'manageMenus');
   const canManageRedirects = user && has(c, 'manageRedirects');
   const canManageSettings  = user && has(c, 'manageSettings');
   const canManageUsers     = user && has(c, 'manageUsers');
   const canManageJobs      = user && has(c, 'manageJobs');
-  const canManageForms     = user && has(c, 'manageForms');
   // Webhooks gated under manageSettings today; promote to its own cap later.
   const canManageWebhooks  = canManageSettings;
+  const canViewMedia       = user && (has(c, 'manageMedia') || contentTypes.length > 0);
+  const canViewForms       = user && (has(c, 'viewSubmissions') || has(c, 'manageForms'));
 
-  // Editorial-only areas
-  const canViewMedia        = user && (has(c, 'manageMedia') || has(c, 'read', 'page')); // media library is editorial
-  const canViewSubmissions  = user && (has(c, 'viewSubmissions') || has(c, 'manageForms'));
-
-  // Has any developer link to show?
-  const hasDeveloperArea = canManageTypes || canManageForms || canManageRedirects ||
-    canManageSettings || canManageUsers || canManageJobs || canManageWebhooks;
+  const hasSiteArea = canManageMenus || canViewForms || canManageRedirects;
+  const hasAdminArea = canManageUsers || canManageSettings;
+  const hasDeveloperArea = canManageTypes || canManageWebhooks || canManageJobs;
+  const developerOpen = ['types', 'webhooks', 'jobs'].includes(active ?? '');
   return (
   <html lang={tr.locale}>
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width,initial-scale=1" />
       <meta name="robots" content="noindex,nofollow" />
-      <title>{title} · Skelpo CMS</title>
+      <title>{title} · {siteName}</title>
       <style dangerouslySetInnerHTML={{ __html: CSS }} />
       {/* Apply saved theme before paint to avoid flash-of-wrong-theme. */}
       <script dangerouslySetInnerHTML={{ __html: `
         try{var t=localStorage.getItem('skelpo-theme');
         if(t==='light')document.documentElement.setAttribute('data-theme','light');}catch(e){}
       ` }} />
-      {/* Set the toggle icon to match the active theme after DOM loads. */}
-      <script dangerouslySetInnerHTML={{ __html: `
-        document.addEventListener('DOMContentLoaded',function(){
-          var icon=document.getElementById('skelpo-theme-icon');
-          if(icon)icon.textContent=document.documentElement.getAttribute('data-theme')==='light'?'☾':'☀';
-        });
-      ` }} />
+      <script dangerouslySetInnerHTML={{ __html: SHELL_SCRIPT }} />
       <script src="/admin/static/htmx.min.js" defer></script>
     </head>
     <body>
       {user ? (
         <div class="app">
-          <aside class="side">
-            <div class="brand">
-              Skelpo<b>CMS</b>
-            </div>
+          <div class="topbar">
+            <button type="button" aria-label={tr('nav.menu')} onclick="document.body.classList.toggle('nav-open')">☰</button>
+            <strong>{siteName}</strong>
+          </div>
+          <aside class="side" onclick="if(event.target.closest('a'))document.body.classList.remove('nav-open')">
+            <div class="brand" style="padding-bottom:4px">{siteName}</div>
+            {siteUrl
+              ? <a class="sitelink" href={siteUrl} target="_blank" rel="noopener">{tr('nav.visitSite')} ↗</a>
+              : <span class="sitelink muted">Skelpo CMS</span>}
             <nav class="nav">
               <a href="/admin" class={active === 'dashboard' ? 'on' : ''}>{tr('nav.dashboard')}</a>
 
-              {/* ── Editorial ─────────────────────────────────── */}
-              <div class="sec">{tr('nav.editorial')}</div>
-              {showPages ? <a href="/admin/content/page" class={active === 'page' ? 'on' : ''}>{tr('nav.pages')}</a> : null}
-              {showPosts ? <a href="/admin/content/post" class={active === 'post' ? 'on' : ''}>{tr('nav.posts')}</a> : null}
-              {showDocs  ? <a href="/admin/content/doc"  class={active === 'doc'  ? 'on' : ''}>{tr('nav.docs')}</a>  : null}
-              {customTypes.map((ct) => (
+              {contentTypes.length > 0 || canViewMedia ? <div class="sec">{tr('nav.content')}</div> : null}
+              {contentTypes.map((ct) => (
                 <a href={`/admin/content/${ct.slug}`} class={active === ct.slug ? 'on' : ''}>{ct.label}</a>
               ))}
               {canViewMedia ? <a href="/admin/media" class={active === 'media' ? 'on' : ''}>{tr('nav.media')}</a> : null}
-              {canManageMenus ? <a href="/admin/menus" class={active === 'menus' ? 'on' : ''}>{tr('nav.menus')}</a> : null}
-              {canViewSubmissions ? <a href="/admin/forms" class={active === 'forms' ? 'on' : ''}>{tr('nav.formSubmissions')}</a> : null}
 
-              {/* ── Developer / admin ─────────────────────────── */}
-              {hasDeveloperArea ? <div class="sec">{tr('nav.developer')}</div> : null}
-              {canManageTypes     ? <a href="/admin/types"     class={active === 'types'     ? 'on' : ''}>{tr('nav.contentTypes')}</a> : null}
-              {canManageForms     ? <a href="/admin/forms"     class={active === 'forms-admin' ? 'on' : ''}>{tr('nav.formsAdmin')}</a> : null}
+              {hasSiteArea ? <div class="sec">{tr('nav.site')}</div> : null}
+              {canManageMenus ? <a href="/admin/menus" class={active === 'menus' ? 'on' : ''}>{tr('nav.menus')}</a> : null}
+              {canViewForms ? <a href="/admin/forms" class={active === 'forms' ? 'on' : ''}>{tr('nav.forms')}</a> : null}
               {canManageRedirects ? <a href="/admin/redirects" class={active === 'redirects' ? 'on' : ''}>{tr('nav.redirects')}</a> : null}
-              {canManageWebhooks  ? <a href="/admin/webhooks"  class={active === 'webhooks'  ? 'on' : ''}>{tr('nav.webhooks')}</a> : null}
-              {canManageJobs      ? <a href="/admin/jobs"      class={active === 'jobs'      ? 'on' : ''}>{tr('nav.jobs')}</a> : null}
-              {canManageSettings  ? <a href="/admin/settings"  class={active === 'settings'  ? 'on' : ''}>{tr('nav.settings')}</a> : null}
-              {canManageUsers     ? <a href="/admin/users"     class={active === 'users'     ? 'on' : ''}>{tr('nav.users')}</a> : null}
+
+              {hasAdminArea ? <div class="sec">{tr('nav.administration')}</div> : null}
+              {canManageUsers ? <a href="/admin/users" class={active === 'users' ? 'on' : ''}>{tr('nav.users')}</a> : null}
+              {canManageSettings ? <a href="/admin/settings" class={active === 'settings' ? 'on' : ''}>{tr('nav.settings')}</a> : null}
+
+              {hasDeveloperArea ? (
+                <details open={developerOpen}>
+                  <summary>{tr('nav.developer')}</summary>
+                  {canManageTypes    ? <a href="/admin/types"    class={active === 'types'    ? 'on' : ''}>{tr('nav.contentTypes')}</a> : null}
+                  {canManageWebhooks ? <a href="/admin/webhooks" class={active === 'webhooks' ? 'on' : ''}>{tr('nav.webhooks')}</a> : null}
+                  {canManageJobs     ? <a href="/admin/jobs"     class={active === 'jobs'     ? 'on' : ''}>{tr('nav.jobs')}</a> : null}
+                </details>
+              ) : null}
             </nav>
             <div style="margin-top:auto;padding:14px 10px 0;border-top:1px solid var(--line)">
-              <div class="muted" style="font-size:12px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-                <span>{user.displayName}</span>
-                {(user as { roleSlug?: string }).roleSlug ? (
-                  <span style="background:var(--panel2);color:var(--acc2);font-size:10px;text-transform:uppercase;letter-spacing:0.05em;padding:1px 6px;border-radius:4px;font-weight:600">
-                    {(user as { roleSlug?: string }).roleSlug}
-                  </span>
-                ) : null}
-              </div>
+              <a href="/admin/profile" class={active === 'profile' ? 'on' : ''} style="font-size:13px;font-weight:600;color:var(--ink);display:block">
+                {user.displayName}
+              </a>
               {/* Language switcher — saves to the user's locale + cookie and
                   reloads the current page in the chosen language. */}
               <form method="post" action="/admin/profile/language" style="margin:8px 0 0">
                 <input type="hidden" name="return" id="skelpo-lang-return" />
-                <label for="skelpo-lang-select" style="margin:0 0 4px;font-size:11px">{tr('nav.language')}</label>
                 <select
                   id="skelpo-lang-select"
                   name="locale"
+                  aria-label={tr('nav.language')}
                   style="font-size:12px;padding:5px 8px"
                   onchange="document.getElementById('skelpo-lang-return').value=location.pathname+location.search;this.form.submit()"
                 >
@@ -233,9 +333,10 @@ export const StatusBadge: FC<{ status: string; t?: Translator }> = ({ status, t 
     draft: 'b-draft',
     review: 'b-rev',
     archived: 'b-arch',
+    scheduled: 'b-rev',
   };
   // Translate known statuses; unknown values render verbatim.
-  const label = t && ['published', 'draft', 'review', 'archived'].includes(status)
+  const label = t && ['published', 'draft', 'review', 'archived', 'scheduled'].includes(status)
     ? t(`status.${status}`)
     : status;
   return <span class={`badge ${map[status] ?? 'b-draft'}`}>{label}</span>;

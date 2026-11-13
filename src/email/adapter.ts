@@ -40,7 +40,8 @@ class ResendBackend implements EmailBackend {
       },
       body: JSON.stringify({
         from: `${config.email.fromName} <${config.email.from}>`,
-        to: [msg.to],
+        // Allow several recipients in one field: "a@x.de, b@y.de".
+        to: String(msg.to).split(/[;,]/).map((a) => a.trim()).filter(Boolean),
         subject: msg.subject,
         html: msg.html,
         text: msg.text,
@@ -84,7 +85,9 @@ interface TemplateRow {
 }
 
 function interpolate(tpl: string, vars: Record<string, string>): string {
-  return tpl.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, k: string) => vars[k] ?? '');
+  // MySQL returns TEXT columns as Buffer through this driver, and Buffer has no
+  // .replace — coerce first, or every form notification throws.
+  return String(tpl).replace(/\{\{\s*(\w+)\s*\}\}/g, (_, k: string) => vars[k] ?? '');
 }
 
 export function escapeHtml(s: string): string {

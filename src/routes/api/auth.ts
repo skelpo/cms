@@ -25,6 +25,7 @@ import {
   revokeToken,
 } from '../../auth/tokens.js';
 import { errorResponse, clientIp, userAgent, isHttps } from './_helpers.js';
+import { verifyTotpForUser } from '../../auth/totp.js';
 
 const SESSION_COOKIE = 'skelpoSession';
 
@@ -78,19 +79,17 @@ authRoutes.post('/login', async (c) => {
     return errorResponse(c, 'unauthorized', 'Invalid credentials', 401);
   }
 
-  // 4. TOTP check if enabled. Real verification (src/auth/totp.ts) is NOT yet
-  // implemented, so we FAIL CLOSED: an account with TOTP enabled cannot obtain
-  // a session until the code can actually be validated against the stored
-  // secret. (Previously this accepted ANY 6-digit value — a complete 2FA
-  // bypass.) No enrollment path currently sets totpVerified=1, so no working
-  // account is affected today.
+  // 4. Two-factor: accounts with TOTP enabled must also send a valid,
+  // not-yet-used code from their authenticator app.
   if (user.totpVerified === 1) {
-    return errorResponse(
-      c,
-      'unavailable',
-      'Two-factor authentication is enabled for this account, but verification is not yet available. Contact an administrator.',
-      503,
-    );
+    const code = String(body.totpCode ?? '').trim();
+    if (!code) {
+      return errorResponse(c, 'unauthorized', 'Two-factor code required (send totpCode)', 401, { totpRequired: true });
+    }
+    if (!(await verifyTotpForUser(user.id, user.totpSecret, code))) {
+      await recordLoginAttempt(email, ip, false);
+      return errorResponse(c, 'unauthorized', 'Invalid two-factor code', 401, { totpRequired: true });
+    }
   }
 
   // 5. Issue session.

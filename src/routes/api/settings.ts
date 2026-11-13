@@ -1,7 +1,7 @@
 // /api/v1/settings/*
 
 import { Hono } from 'hono';
-import { getAllSettings, getPublicSettings, getSetting, isSensitiveSettingKey, setSetting, invalidateSettingsCache } from '../../settings/store.js';
+import { getAllSettings, getPublicSettings, getSetting, isSensitiveSettingKey, setSetting, invalidateSettingsCache, deleteSetting } from '../../settings/store.js';
 import { invalidate } from '../../cache/deps.js';
 import { fireEvent } from '../../webhooks/dispatch.js';
 import { withCache } from '../../cache/respond.js';
@@ -71,6 +71,24 @@ settingsRoutes.put('/:key', async (c) => {
   invalidate(['settings:all']);
   void fireEvent('setting.changed', { key }, [`setting:${key}`, 'settings:all']);
   return c.json({ data: { [key]: body.value } });
+});
+
+// ─── DELETE /settings/:key ───────────────────────────────────────────────
+
+settingsRoutes.delete('/:key', async (c) => {
+  const auth = requireAuth(c);
+  if (isResponse(auth)) return auth;
+  if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageSettings')) {
+    return errorResponse(c, 'forbidden', 'manageSettings capability required', 403);
+  }
+  const key = c.req.param('key');
+  const existed = await deleteSetting(key);
+  if (!existed) return errorResponse(c, 'notFound', `Unknown setting: ${key}`, 404);
+  invalidateSettingsCache();
+  invalidate([`setting:${key}`]);
+  invalidate(['settings:all']);
+  void fireEvent('setting.changed', { key, deleted: true }, [`setting:${key}`, 'settings:all']);
+  return c.body(null, 204);
 });
 
 // ─── PUT /settings (bulk) ────────────────────────────────────────────────

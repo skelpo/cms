@@ -62,6 +62,13 @@ export async function setSetting(key: string, value: unknown, updatedBy?: number
   if (cache) cache.set(key, value);
 }
 
+/** Remove a setting entirely (used by the admin's "delete setting" action). */
+export async function deleteSetting(key: string): Promise<boolean> {
+  const res = await execute('DELETE FROM `settings` WHERE `keyName` = ?', [key]);
+  cache?.delete(key);
+  return (res as { affectedRows?: number }).affectedRows !== 0;
+}
+
 export async function getSiteUrl(): Promise<string> {
   return getSetting<string>('site.url', 'http://localhost:3000');
 }

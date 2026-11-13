@@ -14,6 +14,7 @@ import {
   clearFailedAttemptsForEmail,
 } from '../auth/ratelimit.js';
 import { findUserByEmail, findRoleById, touchLastLogin } from '../auth/users.js';
+import { createPendingLogin, usePendingLogin, clearPendingLogin, verifyTotpForUser } from '../auth/totp.js';
 import type { AuthContext } from '../auth/middleware.js';
 import { query, queryOne, execute } from '../db/client.js';
 import { listTypes, getTypeBySlug } from '../content/types.js';
@@ -31,6 +32,10 @@ import { jobStats } from '../jobs/queue.js';
 import { clientIp, userAgent, isHttps } from '../routes/api/_helpers.js';
 import { ContentForm, parseContentForm } from './contentEditor.js';
 import { adminScreens } from './screens.js';
+import { adminSite } from './siteScreens.js';
+import { adminTypes } from './typeScreens.js';
+import { adminAccount } from './account.js';
+import { adminContent } from './contentRoutes.js';
 import { can } from '../permissions/check.js';
 import { getT, makeT } from './i18n/index.js';
 import { ADMIN_LANG_COOKIE, attachAdminI18n } from './i18n/middleware.js';
@@ -49,6 +54,10 @@ adminRoutes.route('/static', adminStatic);
 
 // Secondary screens (settings, users, redirects, menus, jobs, webhooks).
 adminRoutes.route('/', adminScreens);
+adminRoutes.route('/', adminSite);
+adminRoutes.route('/', adminTypes);
+adminRoutes.route('/', adminAccount);
+adminRoutes.route('/', adminContent);
 
 // ── Auth gate ──────────────────────────────────────────────────────────
 
@@ -81,18 +90,22 @@ adminRoutes.get('/login', (c) => {
         <p class="muted" style="margin-top:-6px">
           {t('auth.signInPrompt')}
         </p>
-        {err ? <div class="err">{err}</div> : null}
+        {err ? <div class="err" role="alert">{err}</div> : null}
+        {c.req.query('ok') ? <div class="ok" role="status">{c.req.query('ok')}</div> : null}
         <form method="post" action="/admin/login">
           <label>{t('auth.email')}</label>
           <input type="email" name="email" required autofocus />
           <label>{t('auth.password')}</label>
-          <input type="password" name="password" required />
+          <input type="password" name="password" required autocomplete="current-password" />
           <div style="margin-top:18px">
             <button class="btn" type="submit" style="width:100%">
               {t('auth.signIn')}
             </button>
           </div>
         </form>
+        <p style="text-align:center;font-size:12px;margin:14px 0 0">
+          <a href="/admin/forgot-password">{t('auth.forgotPassword')}</a>
+        </p>
       </div>
     </AdminPage>,
   );
@@ -119,13 +132,18 @@ adminRoutes.post('/login', async (c) => {
     await recordLoginAttempt(email, ip, false);
     return c.redirect('/admin/login?err=' + encodeURIComponent(t('auth.invalidCredentials')), 302);
   }
-  // Fail CLOSED for TOTP-enabled accounts until real verification ships — the
-  // admin path must not issue a session on password alone. (Matches the API.)
+  // Two-factor accounts get a short-lived ticket instead of a session; the
+  // code step below turns it into one.
   if (user.totpVerified === 1) {
-    await recordLoginAttempt(email, ip, false);
-    return c.redirect('/admin/login?err=' + encodeURIComponent('Two-factor authentication is enabled for this account, but verification is not yet available. Contact an administrator.'), 302);
+    c.header('Cache-Control', 'no-store');
+    return c.html(<TwoFactorPage t={t} ticket={createPendingLogin(user.id, email)} />);
   }
-  const { token, expiresAt } = await createSession(user.id, { ip, userAgent: userAgent(c) });
+  await completeLogin(c, user.id, email, ip);
+  return c.redirect('/admin', 302);
+});
+
+async function completeLogin(c: Context, userId: number, email: string, ip: string): Promise<void> {
+  const { token, expiresAt } = await createSession(userId, { ip, userAgent: userAgent(c) });
   setCookie(c, SESSION_COOKIE, token, {
     httpOnly: true,
     secure: isHttps(c),
@@ -133,9 +151,60 @@ adminRoutes.post('/login', async (c) => {
     path: '/',
     expires: expiresAt,
   });
-  await touchLastLogin(user.id);
+  await touchLastLogin(userId);
   await clearFailedAttemptsForEmail(email);
   await recordLoginAttempt(email, ip, true);
+}
+
+const TwoFactorPage = ({ t, ticket, err }: { t: ReturnType<typeof getT>; ticket: string; err?: string }) => (
+  <AdminPage title={t('auth.twoFactorTitle')} t={t}>
+    <div class="card">
+      <div class="brand" style="padding-left:0">
+        Skelpo<b>CMS</b>
+      </div>
+      <h2 style="font-size:16px;margin:0 0 6px">{t('auth.twoFactorTitle')}</h2>
+      <p class="muted" style="margin-top:0">{t('auth.twoFactorPrompt')}</p>
+      {err ? <div class="err" role="alert">{err}</div> : null}
+      <form method="post" action="/admin/login/code">
+        <input type="hidden" name="ticket" value={ticket} />
+        <label for="code">{t('auth.twoFactorCode')}</label>
+        <input type="text" name="code" id="code" required autofocus inputmode="numeric" pattern="[0-9 ]*" maxlength={7}
+          autocomplete="one-time-code" style="font-size:20px;letter-spacing:4px;text-align:center" />
+        <div style="margin-top:18px">
+          <button class="btn" type="submit" style="width:100%">{t('auth.twoFactorVerify')}</button>
+        </div>
+      </form>
+      <p class="help" style="text-align:center">{t('auth.twoFactorLost')}</p>
+    </div>
+    <p style="text-align:center;font-size:12px;margin-top:14px"><a href="/admin/login">{t('account.backToSignIn')}</a></p>
+  </AdminPage>
+);
+
+adminRoutes.post('/login/code', async (c) => {
+  const t = getT(c);
+  const form = await c.req.parseBody();
+  const ticket = String(form.ticket ?? '');
+  const ip = clientIp(c);
+  const expired = () => c.redirect('/admin/login?err=' + encodeURIComponent(t('auth.twoFactorExpired')), 302);
+  const p = usePendingLogin(ticket);
+  if (!p) return expired();
+  const rate = await checkLoginRateLimit(p.email, ip);
+  if (!rate.allowed) {
+    clearPendingLogin(ticket);
+    return c.redirect('/admin/login?err=' + encodeURIComponent(t('auth.tooManyAttempts')), 302);
+  }
+  const user = await findUserByEmail(p.email);
+  if (!user || user.id !== p.userId || user.totpVerified !== 1) {
+    clearPendingLogin(ticket);
+    return expired();
+  }
+  if (!(await verifyTotpForUser(user.id, user.totpSecret, String(form.code ?? '')))) {
+    await recordLoginAttempt(p.email, ip, false);
+    c.header('Cache-Control', 'no-store');
+    return c.html(<TwoFactorPage t={t} ticket={ticket} err={t('auth.twoFactorWrong')} />, 401);
+  }
+  clearPendingLogin(ticket);
+  await completeLogin(c, user.id, p.email, ip);
   return c.redirect('/admin', 302);
 });
 
@@ -166,52 +235,6 @@ function safeAdminReturn(ret: string): string {
   return ret.startsWith('/admin') && !ret.startsWith('/admin/login') ? ret : '/admin';
 }
 
-adminRoutes.get('/profile', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  const t = getT(c);
-  const current = coerceLocale(auth.user.locale) ?? t.locale;
-  const flash = c.req.query('ok');
-  return c.html(
-    <AdminPage title={t('profile.title')} active="profile" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
-      <div class="top">
-        <h1>{t('profile.heading')}</h1>
-      </div>
-      {flash ? <div class="ok">{decodeURIComponent(flash)}</div> : null}
-      <div class="card" style="max-width:520px">
-        <p class="muted" style="margin-top:0">{t('profile.intro')}</p>
-        <form method="post" action="/admin/profile">
-          <label>{t('profile.email')}</label>
-          <input type="text" value={auth.user.email} disabled />
-          <label>{t('profile.role')}</label>
-          <input type="text" value={auth.role.label} disabled />
-          <label>{t('profile.displayLanguage')}</label>
-          <select name="locale">
-            {adminLocales.map((l) => (
-              <option value={l} selected={l === current}>{adminLocaleNames[l]}</option>
-            ))}
-          </select>
-          <div class="muted" style="font-size:12px;margin-top:6px">{t('profile.languageHint')}</div>
-          <div style="margin-top:18px">
-            <button class="btn" type="submit">{t('profile.save')}</button>
-          </div>
-        </form>
-      </div>
-    </AdminPage>,
-  );
-});
-
-adminRoutes.post('/profile', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  const body = await c.req.parseBody();
-  const locale = coerceLocale(String(body.locale ?? ''));
-  if (locale) await rememberLocale(c, auth.user.id, locale);
-  // Flash in the (possibly new) language.
-  const t = locale ? makeT(locale) : getT(c);
-  return c.redirect('/admin/profile?ok=' + encodeURIComponent(t('profile.flashSaved')), 302);
-});
-
 // Quick language switcher from the sidebar — saves and returns to the page
 // the user was on.
 adminRoutes.post('/profile/language', async (c) => {
@@ -229,126 +252,130 @@ adminRoutes.get('/', async (c) => {
   const auth = gate(c);
   if (notAuth(auth)) return auth;
   const t = getT(c);
-  const canManageSettings = can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageSettings');
+  const ctx = { userId: auth.user.id, caps: auth.role.capabilities };
+  const canManageSettings = can(ctx, 'manageSettings');
+  const canManageJobs = can(ctx, 'manageJobs');
 
-  const [pages, posts, docs, users, jobsByStatus, maintRow, previewRow, siteUrlRow] = await Promise.all([
-    queryOne<{ n: number }>("SELECT COUNT(*) n FROM `content` WHERE `typeSlug`='page'"),
-    queryOne<{ n: number }>("SELECT COUNT(*) n FROM `content` WHERE `typeSlug`='post'"),
-    queryOne<{ n: number }>("SELECT COUNT(*) n FROM `content` WHERE `typeSlug`='doc'"),
-    queryOne<{ n: number }>('SELECT COUNT(*) n FROM `users`'),
-    jobStats(),
-    queryOne<{ value: unknown }>("SELECT `value` FROM `settings` WHERE `keyName` = 'site.maintenance'"),
-    queryOne<{ value: unknown }>("SELECT `value` FROM `settings` WHERE `keyName` = 'site.previewToken'"),
-    queryOne<{ value: unknown }>("SELECT `value` FROM `settings` WHERE `keyName` = 'site.url'"),
+  const hidden = await getHiddenTypes();
+  const types = (await listTypes())
+    .filter((ct) => !['form', 'errorPage'].includes(ct.slug) && !hidden.includes(ct.slug))
+    .filter((ct) => can(ctx, 'read', ct.slug));
+  const typeLabel = new Map(types.map((ct) => [ct.slug, ct.labelSingular]));
+
+  const [countRows, mediaRow, jobsByStatus, maintenance, siteUrlRaw, siteNameRaw] = await Promise.all([
+    query<{ typeSlug: string; status: string; n: number }>(
+      "SELECT `typeSlug`, `status`, COUNT(*) n FROM `content` WHERE `status` != 'archived' GROUP BY `typeSlug`, `status`"),
+    queryOne<{ n: number }>('SELECT COUNT(*) n FROM `media`'),
+    canManageJobs ? jobStats() : Promise.resolve({} as Record<string, number>),
+    getSetting<unknown>('site.maintenance', false),
+    getSetting<unknown>('site.url', ''),
+    getSetting<unknown>('site.name', ''),
   ]);
-  const maintenanceOn = maintRow?.value === true;
-  const previewToken = typeof previewRow?.value === 'string' ? previewRow.value : null;
-  const siteUrl = typeof siteUrlRow?.value === 'string' ? siteUrlRow.value : '';
-  const previewLink = siteUrl && previewToken ? `${siteUrl.replace(/\/+$/, '')}/?preview=${encodeURIComponent(previewToken)}` : null;
-  const flash = c.req.query('ok');
+  const counts = new Map<string, { published: number; drafts: number }>();
+  for (const r of countRows) {
+    const cur = counts.get(r.typeSlug) ?? { published: 0, drafts: 0 };
+    if (r.status === 'published') cur.published += Number(r.n); else cur.drafts += Number(r.n);
+    counts.set(r.typeSlug, cur);
+  }
+  const siteUrl = typeof siteUrlRaw === 'string' && /^https?:\/\//.test(siteUrlRaw) ? siteUrlRaw : '';
+  const siteName = typeof siteNameRaw === 'string' && siteNameRaw.trim() ? siteNameRaw.trim() : 'Skelpo CMS';
+  const failedJobs = Number(jobsByStatus.failed ?? 0) + Number(jobsByStatus.dead ?? 0);
 
-  const recent = await query<{ id: number; title: string; typeSlug: string; status: string; updatedAt: unknown }>(
-    "SELECT `id`,`title`,`typeSlug`,`status`,`updatedAt` FROM `content` WHERE `status` != 'archived' ORDER BY `updatedAt` DESC LIMIT 8",
+  const slugs = types.map((ct) => ct.slug);
+  const recent = slugs.length === 0 ? [] : await query<{
+    id: number; title: string; typeSlug: string; status: string; locale: string; updatedAt: unknown; authorId: number | null; authorName: string | null;
+  }>(
+    `SELECT c.\`id\`, c.\`title\`, c.\`typeSlug\`, c.\`status\`, c.\`locale\`, c.\`updatedAt\`, c.\`authorId\`, u.\`displayName\` AS authorName
+       FROM \`content\` c LEFT JOIN \`users\` u ON u.\`id\` = c.\`authorId\`
+      WHERE c.\`status\` != 'archived' AND c.\`typeSlug\` IN (${slugs.map(() => '?').join(',')})
+      ORDER BY c.\`updatedAt\` DESC LIMIT 30`,
+    slugs,
   );
+  // Same visibility rules as the lists: no drafts you may not read.
+  const visibleRecent = recent.filter((r) => r.status === 'published'
+    || (r.authorId === auth.user.id ? can(ctx, 'readDrafts', r.typeSlug) : can(ctx, 'readOthersDrafts', r.typeSlug))).slice(0, 8);
+  const creatable = types.filter((ct) => can(ctx, 'create', ct.slug));
+  const flash = c.req.query('ok');
+  const err = c.req.query('err');
 
   return c.html(
     <AdminPage title={t('dashboard.title')} active="dashboard" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
       <div class="top">
-        <h1>{t('dashboard.title')}</h1>
-        <span class="muted">{t('dashboard.signedInAs', { name: auth.user.displayName })}</span>
+        <h1>{t('dashboard.welcome', { name: auth.user.displayName })}</h1>
+        {siteUrl ? <a class="btn sec" href={siteUrl} target="_blank" rel="noopener">{t('nav.visitSite')} ↗</a> : null}
       </div>
-      {flash ? <div class="ok">{decodeURIComponent(flash)}</div> : null}
+      {flash ? <div class="ok" role="status">{flash}</div> : null}
+      {err ? <div class="err" role="alert">{err}</div> : null}
 
-      {/* Maintenance status — prominent if on, low-key if off. Hidden for
-          users without manageSettings (matches sidebar gating). */}
-      {canManageSettings ? (
-        <div class="card" style={`margin-bottom:18px;${maintenanceOn
-          ? 'border-color:#f59e0b;background:linear-gradient(0deg,rgba(245,158,11,.08),rgba(245,158,11,.08))'
-          : ''}`}>
-          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
-            <div style={`width:10px;height:10px;border-radius:999px;background:${maintenanceOn ? '#f59e0b' : '#34d399'};box-shadow:0 0 0 4px ${maintenanceOn ? 'rgba(245,158,11,.18)' : 'rgba(52,211,153,.16)'};flex-shrink:0`} />
-            <div style="flex:1;min-width:240px">
-              <div style="font-weight:600;font-size:14px">
-                {t('dashboard.maintenanceMode')} <span style={`color:${maintenanceOn ? 'var(--acc2)' : 'var(--ok)'}`}>{maintenanceOn ? t('dashboard.on') : t('dashboard.off')}</span>
-              </div>
-              <div class="muted" style="font-size:12px;margin-top:3px">
-                {maintenanceOn
-                  ? t('dashboard.maintenanceOnDesc')
-                  : t('dashboard.maintenanceOffDesc')}
-              </div>
-            </div>
-            <form method="post" action="/admin/maintenance/toggle" style="margin:0">
-              <button class="btn" type="submit" style={maintenanceOn ? 'background:var(--ok);color:#06281c' : ''}>
-                {maintenanceOn ? t('dashboard.turnOff') : t('dashboard.turnOn')}
-              </button>
-            </form>
-          </div>
-          {maintenanceOn && previewLink ? (
-            <div style="margin-top:12px;padding:10px 12px;background:var(--panel2);border-radius:6px;font-size:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-              <span class="muted">{t('dashboard.previewLinkLabel')}</span>
-              <code style="background:var(--bg);padding:4px 8px;border-radius:4px;flex:1;min-width:300px;overflow:auto;font-size:11px">{previewLink}</code>
-              <form method="post" action="/admin/maintenance/rotate-token" style="margin:0">
-                <button class="btn sm sec" type="submit" title={t('dashboard.rotateTitle')}>{t('dashboard.rotate')}</button>
-              </form>
-            </div>
-          ) : null}
-          <div class="muted" style="font-size:11px;margin-top:10px;line-height:1.5">
-            {t('dashboard.editVisitorMessage')}{' '}
-            <a href="/admin/settings/site.maintenanceTitle">{t('dashboard.visitorTitle')}</a> · <a href="/admin/settings/site.maintenanceMessage">{t('dashboard.visitorBody')}</a>
+      {maintenance === true ? (
+        <div class="err" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+          <span style="flex:1">{t('dashboard.maintenanceBanner', { site: siteName })}</span>
+          {canManageSettings ? <a class="btn sm sec" href="/admin/settings?tab=maintenance">{t('dashboard.maintenanceManage')}</a> : null}
+        </div>
+      ) : null}
+      {canManageJobs && failedJobs > 0 ? (
+        <div class="err">{t.plural('dashboard.failedJobs', failedJobs)} <a href="/admin/jobs">{t('dashboard.failedJobsLink')}</a></div>
+      ) : null}
+
+      {creatable.length > 0 ? (
+        <div class="card" style="margin-bottom:14px">
+          <h3>{t('dashboard.quickCreate')}</h3>
+          <div class="toolbar" style="margin-top:10px">
+            {creatable.map((ct) => (
+              <a class="btn sec" href={`/admin/content/${ct.slug}/new`}>{t('content.newItem', { label: ct.labelSingular })}</a>
+            ))}
           </div>
         </div>
       ) : null}
 
-      <div class="grid g4">
-        <div class="card">
-          <div class="stat">{pages?.n ?? 0}</div>
-          <div class="stat-l">{t('dashboard.statPages')}</div>
-        </div>
-        <div class="card">
-          <div class="stat">{posts?.n ?? 0}</div>
-          <div class="stat-l">{t('dashboard.statPosts')}</div>
-        </div>
-        <div class="card">
-          <div class="stat">{docs?.n ?? 0}</div>
-          <div class="stat-l">{t('dashboard.statDocs')}</div>
-        </div>
-        <div class="card">
-          <div class="stat">{users?.n ?? 0}</div>
-          <div class="stat-l">{t('dashboard.statUsers')}</div>
-        </div>
+      <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(180px,1fr))">
+        {types.map((ct) => {
+          const n = counts.get(ct.slug) ?? { published: 0, drafts: 0 };
+          return (
+            <a class="card" href={`/admin/content/${ct.slug}`} style="text-decoration:none;color:inherit">
+              <div class="stat">{n.published}</div>
+              <div class="stat-l">{ct.labelPlural}</div>
+              <div class="muted" style="font-size:12px;margin-top:6px">
+                {n.drafts > 0 ? t.plural('dashboard.draftsCount', n.drafts) : t('dashboard.noDrafts')}
+              </div>
+            </a>
+          );
+        })}
+        <a class="card" href="/admin/media" style="text-decoration:none;color:inherit">
+          <div class="stat">{Number(mediaRow?.n ?? 0)}</div>
+          <div class="stat-l">{t('nav.media')}</div>
+        </a>
       </div>
+
       <div class="card" style="margin-top:18px">
-        <h3 style="margin-top:0">{t('dashboard.recentlyUpdated')}</h3>
-        <table>
-          <thead>
-            <tr>
-              <th>{t('dashboard.colTitle')}</th>
-              <th>{t('dashboard.colType')}</th>
-              <th>{t('dashboard.colStatus')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {recent.map((r) => (
+        <h3>{t('dashboard.recentlyUpdated')}</h3>
+        {visibleRecent.length === 0 ? <div class="muted" style="margin-top:8px">{t('dashboard.nothingYet')}</div> : (
+          <table style="margin-top:8px">
+            <thead>
               <tr>
-                <td>
-                  <a href={`/admin/content/${r.typeSlug}/${r.id}`}>{r.title}</a>
-                </td>
-                <td class="muted">{r.typeSlug}</td>
-                <td>
-                  <StatusBadge status={r.status} t={t} />
-                </td>
+                <th>{t('dashboard.colTitle')}</th>
+                <th>{t('dashboard.colType')}</th>
+                <th>{t('dashboard.colStatus')}</th>
+                <th>{t('content.colAuthor')}</th>
+                <th>{t('content.colUpdated')}</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div class="card" style="margin-top:18px">
-        <h3 style="margin-top:0">{t('dashboard.jobQueue')}</h3>
-        <div class="muted">
-          {Object.entries(jobsByStatus)
-            .map(([k, v]) => `${k}: ${v}`)
-            .join('  ·  ') || t('common.idle')}
-        </div>
+            </thead>
+            <tbody>
+              {visibleRecent.map((r) => (
+                <tr>
+                  <td>
+                    <a href={`/admin/content/${r.typeSlug}/${r.id}`}>{r.title}</a>{' '}
+                    <span class="muted" style="font-size:11px;text-transform:uppercase">{r.locale}</span>
+                  </td>
+                  <td class="muted">{typeLabel.get(r.typeSlug) ?? r.typeSlug}</td>
+                  <td><StatusBadge status={r.status} t={t} /></td>
+                  <td class="muted">{r.authorName ?? '—'}</td>
+                  <td class="muted"><DateTime value={r.updatedAt} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
     </AdminPage>,
   );
@@ -356,14 +383,16 @@ adminRoutes.get('/', async (c) => {
 
 // ── Maintenance: toggle + rotate preview token ─────────────────────────
 
-import { setSetting, invalidateSettingsCache, getDefaultLocale } from '../settings/store.js';
+import { setSetting, invalidateSettingsCache, getSetting } from '../settings/store.js';
+import { getHiddenTypes } from './layout.js';
+import { DateTime } from './helpers.js';
 
 adminRoutes.post('/maintenance/toggle', async (c) => {
   const auth = gate(c);
   if (notAuth(auth)) return auth;
   const t = getT(c);
   if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'manageSettings')) {
-    return c.redirect('/admin?ok=' + encodeURIComponent(t('dashboard.flashPermDenied')), 302);
+    return c.redirect('/admin?err=' + encodeURIComponent(t('dashboard.flashPermDenied')), 302);
   }
   const current = await queryOne<{ value: unknown }>(
     "SELECT `value` FROM `settings` WHERE `keyName` = 'site.maintenance'",
@@ -372,7 +401,8 @@ adminRoutes.post('/maintenance/toggle', async (c) => {
   await setSetting('site.maintenance', next, auth.user.id);
   invalidate(['setting:site.maintenance']);
   invalidateSettingsCache();
-  return c.redirect('/admin?ok=' + encodeURIComponent(
+  void fireEvent('setting.changed', { key: 'site.maintenance' }, ['setting:site.maintenance', 'settings:all']);
+  return c.redirect('/admin/settings?tab=maintenance&ok=' + encodeURIComponent(
     next ? t('dashboard.flashMaintOn') : t('dashboard.flashMaintOff'),
   ), 302);
 });
@@ -392,407 +422,5 @@ adminRoutes.post('/maintenance/rotate-token', async (c) => {
   await setSetting('site.previewToken', tok, auth.user.id);
   invalidate(['setting:site.previewToken']);
   invalidateSettingsCache();
-  return c.redirect('/admin?ok=' + encodeURIComponent(t('dashboard.flashTokenRotated')), 302);
-});
-
-// ── Content types index ────────────────────────────────────────────────
-
-adminRoutes.get('/types', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  const t = getT(c);
-  const types = await listTypes();
-  // Per-type row counts (any locale)
-  const counts = new Map<string, number>();
-  for (const ct of types) {
-    const r = await queryOne<{ n: number }>(
-      'SELECT COUNT(*) n FROM `content` WHERE `typeSlug` = ?',
-      [ct.slug],
-    );
-    counts.set(ct.slug, r?.n ?? 0);
-  }
-  return c.html(
-    <AdminPage title={t('types.title')} active="types" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
-      <div class="top">
-        <h1>{t('types.title')}</h1>
-        <span class="muted">{t.plural('types.count', types.length)}</span>
-      </div>
-      <div class="card">
-        <table>
-          <thead>
-            <tr>
-              <th>{t('types.colType')}</th>
-              <th>{t('types.colLabel')}</th>
-              <th>{t('types.colUrlPattern')}</th>
-              <th>{t('types.colRows')}</th>
-              <th>{t('types.colSchemaRev')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {types.map((ct) => (
-              <tr>
-                <td>
-                  <a href={`/admin/content/${ct.slug}`}>{ct.slug}</a>
-                </td>
-                <td class="muted">{ct.labelPlural}</td>
-                <td class="muted">{ct.urlPattern ?? '—'}</td>
-                <td class="muted">{counts.get(ct.slug) ?? 0}</td>
-                <td class="muted">v{ct.currentRevision ?? 1}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </AdminPage>,
-  );
-});
-
-// ── Content list ───────────────────────────────────────────────────────
-
-adminRoutes.get('/content/:type', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  const t = getT(c);
-  const typeSlug = c.req.param('type');
-  const types = await listTypes();
-  const ct = types.find((x) => x.slug === typeSlug);
-  if (!ct) return c.html(<AdminPage title={t('common.notFound')} t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('common.unknownType')}</AdminPage>, 404);
-
-  const ctx = { userId: auth.user.id, caps: auth.role.capabilities };
-  if (!can(ctx, 'read', ct.slug)) {
-    return c.html(<AdminPage title={t('common.forbidden')} t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('common.forbidden')}</AdminPage>, 403);
-  }
-
-  // Locale filter — defaults to the site's default locale. "all" shows every
-  // locale (useful for diffing translation coverage). Available locales come
-  // from site.locales.
-  const sel = c.req.query('locale') ?? (await getDefaultLocale());
-  let availableLocales: string[] = ['en'];
-  try {
-    const sl = await queryOne<{ value: unknown }>(
-      "SELECT `value` FROM `settings` WHERE `keyName` = 'site.locales'",
-    );
-    if (sl) {
-      const v = typeof sl.value === 'string' ? JSON.parse(sl.value) : sl.value;
-      if (Array.isArray(v) && v.length > 0) availableLocales = v as string[];
-    }
-  } catch { /* default to en */ }
-
-  const canDrafts = can(ctx, 'readDrafts', ct.slug);
-  const canOthers = can(ctx, 'readOthersDrafts', ct.slug);
-  const { rows: allRows } = await listContent({
-    typeSlug,
-    locale: sel === 'all' ? undefined : sel,
-    // Archived (soft-deleted) rows are hidden everywhere in the admin; purge
-    // or restore them via the API (`?status=archived`).
-    status: canDrafts ? ['draft', 'review', 'published'] : ['published'],
-    includeDrafts: canDrafts,
-    limit: 200,
-    sort: '-updatedAt',
-  });
-  // Without readOthersDrafts, hide other people's unpublished rows (keep every
-  // published row + the caller's own drafts).
-  const rows = (canDrafts && !canOthers)
-    ? allRows.filter((r) => r.status === 'published' || r.authorId === auth.user.id)
-    : allRows;
-
-  const rowsLabel = t.plural('common.rows', rows.length);
-  return c.html(
-    <AdminPage title={ct.labelPlural} active={typeSlug} t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>
-      <div class="top">
-        <h1>{ct.labelPlural}</h1>
-        <a class="btn" href={`/admin/content/${typeSlug}/new`}>
-          {t('content.newItem', { label: ct.labelSingular })}
-        </a>
-      </div>
-      <div class="card" style="margin-bottom:14px;padding:10px 14px">
-        <form method="get" style="display:flex;align-items:center;gap:10px;margin:0">
-          <label class="muted" for="locale-sel" style="margin:0">{t('content.locale')}</label>
-          <select name="locale" id="locale-sel" onchange="this.form.submit()" style="background:#15161c;border:1px solid #333;color:#ccc;padding:4px 8px;border-radius:4px">
-            <option value="all" selected={sel === 'all'}>{t('content.allLocales')}</option>
-            {availableLocales.map((l) => (
-              <option value={l} selected={sel === l}>{l}</option>
-            ))}
-          </select>
-          <span class="muted" style="margin-left:auto;font-size:12px">
-            {sel !== 'all'
-              ? t('content.rowsInLocale', { count: rowsLabel, locale: sel })
-              : t('content.rowsAllLocales', { count: rowsLabel })}
-          </span>
-        </form>
-      </div>
-      <div class="card">
-        <table>
-          <thead>
-            <tr>
-              <th>{t('content.colTitle')}</th>
-              <th>{t('content.colSlug')}</th>
-              <th>{t('content.colLocale')}</th>
-              <th>{t('content.colStatus')}</th>
-              <th>{t('content.colUpdated')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.length === 0 ? (
-              <tr>
-                <td colspan={5} class="muted">
-                  {sel !== 'all'
-                    ? t('content.emptyInLocale', { label: ct.labelPlural.toLowerCase(), locale: sel })
-                    : t('content.empty', { label: ct.labelPlural.toLowerCase() })}
-                </td>
-              </tr>
-            ) : (
-              rows.map((r) => (
-                <tr>
-                  <td>
-                    <a href={`/admin/content/${typeSlug}/${r.id}`}>{r.title}</a>
-                  </td>
-                  <td class="muted">{r.slug}</td>
-                  <td class="muted">{r.locale}</td>
-                  <td>
-                    <StatusBadge status={r.status} t={t} />
-                  </td>
-                  <td class="muted">{String(r.updatedAt).slice(0, 10)}</td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-    </AdminPage>,
-  );
-});
-
-// Read `site.locales` (universe of locales) for translation tabs.
-async function readSiteLocales(): Promise<string[]> {
-  try {
-    const r = await queryOne<{ value: unknown }>(
-      "SELECT `value` FROM `settings` WHERE `keyName` = 'site.locales'",
-    );
-    if (!r) return ['en'];
-    // JSON column: driver may return either the raw string or a pre-parsed value.
-    const v = typeof r.value === 'string' ? JSON.parse(r.value) : r.value;
-    if (Array.isArray(v) && v.length > 0) return v as string[];
-  } catch { /* fall through */ }
-  return ['en'];
-}
-
-// ── Content editor: new ────────────────────────────────────────────────
-
-adminRoutes.get('/content/:type/new', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  const t = getT(c);
-  const ct = await getTypeBySlug(c.req.param('type'));
-  if (!ct) return c.html(<AdminPage title="404" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('common.unknownType')}</AdminPage>, 404);
-  if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'create', ct.slug)) {
-    return c.html(<AdminPage title={t('common.forbidden')} t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('content.noCreatePermissionFor', { slug: ct.slug })}</AdminPage>, 403);
-  }
-
-  // If creating a translation of an existing row, pre-populate slug + title
-  // from the source row and render locale tabs alongside the form.
-  const translationOfParam = c.req.query('translationOf');
-  const localeParam = c.req.query('locale');
-  let siblings: { id: number; locale: string; status: string }[] = [];
-  let availableLocales: string[] = [];
-  let defaultTitle = '';
-  let defaultSlug = '';
-  let defaultLocale = localeParam ?? (await getDefaultLocale());
-  let translationOf: number | undefined;
-
-  if (translationOfParam) {
-    const sourceId = Number(translationOfParam);
-    const source = await findById(sourceId, true);
-    if (source && source.typeSlug === ct.slug) {
-      translationOf = sourceId;
-      defaultTitle = source.title;
-      defaultSlug = source.slug;
-      siblings = await query<{ id: number; locale: string; status: string }>(
-        "SELECT `id`, `locale`, `status` FROM `content` WHERE `translationGroupId` = ? AND `typeSlug` = ? AND `status` != 'archived' ORDER BY `locale`",
-        [source.translationGroupId, ct.slug],
-      );
-      availableLocales = await readSiteLocales();
-    }
-  }
-
-  return c.html(
-    <ContentForm
-      type={ct}
-      t={t}
-      fields={{}}
-      seo={{}}
-      user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}
-      siblings={siblings}
-      availableLocales={availableLocales}
-      translationOf={translationOf}
-      defaultTitle={defaultTitle}
-      defaultSlug={defaultSlug}
-      defaultLocale={defaultLocale}
-    />,
-  );
-});
-
-// ── Content editor: edit (must come AFTER /new) ────────────────────────
-
-adminRoutes.get('/content/:type/:id{[0-9]+}', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  const t = getT(c);
-  const ct = await getTypeBySlug(c.req.param('type'));
-  if (!ct) return c.html(<AdminPage title="404" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('common.unknownType')}</AdminPage>, 404);
-  const row = await findById(Number(c.req.param('id')), true);
-  if (!row) return c.html(<AdminPage title="404" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('common.notFound')}</AdminPage>, 404);
-  const ctx = { userId: auth.user.id, caps: auth.role.capabilities };
-  if (!can(ctx, 'read', ct.slug)) {
-    return c.html(<AdminPage title={t('common.forbidden')} t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('common.forbidden')}</AdminPage>, 403);
-  }
-  if (row.status !== 'published') {
-    const allowed = row.authorId === auth.user.id
-      ? can(ctx, 'readDrafts', ct.slug)
-      : can(ctx, 'readOthersDrafts', ct.slug);
-    if (!allowed) {
-      return c.html(<AdminPage title={t('common.forbidden')} t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('common.forbidden')}</AdminPage>, 403);
-    }
-  }
-  const fields = typeof row.fields === 'string' ? JSON.parse(row.fields) : row.fields;
-  const seo = typeof row.seo === 'string' ? JSON.parse(row.seo) : row.seo;
-  const flash = c.req.query('ok')
-    ? { ok: c.req.query('ok')! }
-    : c.req.query('err')
-      ? { err: c.req.query('err')! }
-      : undefined;
-
-  // Translation siblings (other-locale rows in the same translation group).
-  const [siblings, availableLocales] = await Promise.all([
-    query<{ id: number; locale: string; status: string }>(
-      'SELECT `id`, `locale`, `status` FROM `content` WHERE `translationGroupId` = ? AND `typeSlug` = ? ORDER BY `locale`',
-      [row.translationGroupId, ct.slug],
-    ),
-    readSiteLocales(),
-  ]);
-
-  return c.html(
-    <ContentForm
-      type={ct}
-      t={t}
-      row={row}
-      fields={fields}
-      seo={seo}
-      user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}
-      flash={flash}
-      siblings={siblings}
-      availableLocales={availableLocales}
-    />,
-  );
-});
-
-// ── Content editor: create (POST) ──────────────────────────────────────
-
-function invalidateAndNotify(event: Parameters<typeof fireEvent>[0], typeSlug: string, locale: string, id: number): void {
-  invalidate([`content:${id}`]);
-  invalidate([`type-list:${typeSlug}:${locale}`], { prefix: true });
-  void fireEvent(event, { id, type: typeSlug, locale }, [`content:${id}`, `type-list:${typeSlug}:${locale}`]);
-}
-
-adminRoutes.post('/content/:type', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  const t = getT(c);
-  const ct = await getTypeBySlug(c.req.param('type'));
-  if (!ct) return c.html(<AdminPage title="404" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('common.unknownType')}</AdminPage>, 404);
-  if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'create', ct.slug)) {
-    return c.html(<AdminPage title={t('common.forbidden')} t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('content.noCreatePermission')}</AdminPage>, 403);
-  }
-  const body = await c.req.parseBody();
-  const p = parseContentForm(body, ct.fieldsSchema.fields);
-  const res = await createContent({
-    type: ct.slug,
-    slug: p.slug,
-    locale: p.locale,
-    title: p.title,
-    fields: p.fields,
-    seo: p.seo,
-    ai: p.ai,
-    status: 'draft',
-    authorId: auth.user.id,
-    translationOf: p.translationOf,
-  });
-  if (!res.ok) {
-    return c.redirect(
-      `/admin/content/${ct.slug}/new?err=` +
-        encodeURIComponent(res.errors[0]?.message ?? t('content.validationFailed')),
-      302,
-    );
-  }
-  invalidateAndNotify('content.created', ct.slug, p.locale, res.id);
-  let dest = `/admin/content/${ct.slug}/${res.id}?ok=${encodeURIComponent(t('content.flashCreated'))}`;
-  if (p.action === 'publish') {
-    const pub = await publishContent(res.id, auth.user.id);
-    if (pub.ok) {
-      invalidateAndNotify('content.published', ct.slug, p.locale, res.id);
-      dest = `/admin/content/${ct.slug}/${res.id}?ok=${encodeURIComponent(t('content.flashPublished'))}`;
-    } else {
-      dest = `/admin/content/${ct.slug}/${res.id}?err=` +
-        encodeURIComponent(t('content.savedPublishBlocked', { reason: pub.errors[0]?.message ?? '' }));
-    }
-  }
-  return c.redirect(dest, 302);
-});
-
-// ── Content editor: update / publish / unpublish / delete (POST) ───────
-
-adminRoutes.post('/content/:type/:id{[0-9]+}', async (c) => {
-  const auth = gate(c);
-  if (notAuth(auth)) return auth;
-  const t = getT(c);
-  const ct = await getTypeBySlug(c.req.param('type'));
-  const id = Number(c.req.param('id'));
-  if (!ct) return c.html(<AdminPage title="404" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('common.unknownType')}</AdminPage>, 404);
-  const existing = await findById(id, true);
-  if (!existing) return c.html(<AdminPage title="404" t={t} user={{ ...auth.user, roleSlug: auth.role.slug }} caps={auth.role.capabilities}>{t('common.notFound')}</AdminPage>, 404);
-
-  const body = await c.req.parseBody();
-  const p = parseContentForm(body, ct.fieldsSchema.fields);
-  const back = `/admin/content/${ct.slug}/${id}`;
-
-  if (p.action === 'delete') {
-    if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'delete', ct.slug, existing.authorId)) {
-      return c.redirect(`${back}?err=${encodeURIComponent(t('content.noDeletePermission'))}`, 302);
-    }
-    await deleteContent(id, false);
-    invalidateAndNotify('content.deleted', ct.slug, existing.locale, id);
-    return c.redirect(`/admin/content/${ct.slug}`, 302);
-  }
-
-  if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'update', ct.slug, existing.authorId)) {
-    return c.redirect(`${back}?err=${encodeURIComponent(t('content.noUpdatePermission'))}`, 302);
-  }
-
-  const upd = await updateContent(
-    id,
-    { title: p.title, slug: p.slug, fields: p.fields, seo: p.seo, ai: p.ai },
-    auth.user.id,
-  );
-  if (!upd.ok) {
-    return c.redirect(`${back}?err=` + encodeURIComponent(upd.errors[0]?.message ?? t('content.updateFailed')), 302);
-  }
-  invalidateAndNotify('content.updated', ct.slug, existing.locale, id);
-
-  if (p.action === 'publish') {
-    if (!can({ userId: auth.user.id, caps: auth.role.capabilities }, 'publish', ct.slug, existing.authorId)) {
-      return c.redirect(`${back}?err=${encodeURIComponent(t('content.noPublishPermission'))}`, 302);
-    }
-    const pub = await publishContent(id, auth.user.id);
-    if (!pub.ok) {
-      return c.redirect(`${back}?err=` + encodeURIComponent(t('content.publishBlocked', { reason: pub.errors[0]?.message ?? '' })), 302);
-    }
-    invalidateAndNotify('content.published', ct.slug, existing.locale, id);
-    return c.redirect(`${back}?ok=${encodeURIComponent(t('content.flashPublished'))}`, 302);
-  }
-  if (p.action === 'unpublish') {
-    await unpublishContent(id, auth.user.id);
-    invalidateAndNotify('content.unpublished', ct.slug, existing.locale, id);
-    return c.redirect(`${back}?ok=${encodeURIComponent(t('content.flashUnpublished'))}`, 302);
-  }
-  return c.redirect(`${back}?ok=${encodeURIComponent(t('content.flashSaved'))}`, 302);
+  return c.redirect('/admin/settings?tab=maintenance&ok=' + encodeURIComponent(t('dashboard.flashTokenRotated')), 302);
 });
