@@ -31,18 +31,51 @@ function randomHex(n: number): string {
 
 // Minimal dimension sniff for the common web formats. Returns nulls for
 // anything we don't parse — width/height are advisory (used for CLS).
-function sniffDimensions(buf: Uint8Array, mime: string): { w: number | null; h: number | null } {
+// The format is detected from the magic bytes, not the declared MIME type:
+// files are often uploaded with the wrong extension (e.g. a WebP named .jpg),
+// and walking a WebP as JPEG markers produced nonsense like 46104×26048.
+export function sniffDimensions(buf: Uint8Array, _mime: string): { w: number | null; h: number | null } {
+  const none = { w: null, h: null };
   try {
-    if (mime === 'image/png' && buf.length > 24) {
-      // IHDR width/height are big-endian uint32 at offsets 16 and 20.
-      const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    const ascii = (at: number, len: number): string => {
+      let out = '';
+      for (let k = 0; k < len && at + k < buf.length; k++) out += String.fromCharCode(buf[at + k]!);
+      return out;
+    };
+    // PNG: IHDR width/height are big-endian uint32 at offsets 16 and 20.
+    if (buf.length > 24 && buf[0] === 0x89 && ascii(1, 3) === 'PNG') {
       return { w: dv.getUint32(16), h: dv.getUint32(20) };
     }
-    if (mime === 'image/jpeg') {
+    // GIF: little-endian uint16 at 6 and 8.
+    if (buf.length > 10 && ascii(0, 3) === 'GIF') {
+      return { w: dv.getUint16(6, true), h: dv.getUint16(8, true) };
+    }
+    // WebP: RIFF....WEBP + VP8X / VP8 / VP8L chunk.
+    if (buf.length > 30 && ascii(0, 4) === 'RIFF' && ascii(8, 4) === 'WEBP') {
+      const chunk = ascii(12, 4);
+      if (chunk === 'VP8X') {
+        const w = 1 + (buf[24]! | (buf[25]! << 8) | (buf[26]! << 16));
+        const h = 1 + (buf[27]! | (buf[28]! << 8) | (buf[29]! << 16));
+        return { w, h };
+      }
+      if (chunk === 'VP8 ') {
+        return { w: dv.getUint16(26, true) & 0x3fff, h: dv.getUint16(28, true) & 0x3fff };
+      }
+      if (chunk === 'VP8L') {
+        const bits = dv.getUint32(21, true);
+        return { w: (bits & 0x3fff) + 1, h: ((bits >> 14) & 0x3fff) + 1 };
+      }
+      return none;
+    }
+    // JPEG: walk the marker segments from SOI to the first SOFn.
+    if (buf.length > 4 && buf[0] === 0xff && buf[1] === 0xd8) {
       let i = 2;
-      while (i < buf.length) {
-        if (buf[i] !== 0xff) { i++; continue; }
+      while (i + 9 < buf.length) {
+        if (buf[i] !== 0xff) return none; // lost sync: give up rather than guess
         const marker = buf[i + 1]!;
+        if (marker === 0xff) { i++; continue; } // fill byte
+        if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue; } // no length
         // SOF0..SOF3, SOF5..SOF7, SOF9..SOF11, SOF13..SOF15
         if (
           (marker >= 0xc0 && marker <= 0xc3) ||
@@ -50,23 +83,16 @@ function sniffDimensions(buf: Uint8Array, mime: string): { w: number | null; h: 
           (marker >= 0xc9 && marker <= 0xcb) ||
           (marker >= 0xcd && marker <= 0xcf)
         ) {
-          const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-          const h = dv.getUint16(i + 5);
-          const w = dv.getUint16(i + 7);
-          return { w, h };
+          return { w: dv.getUint16(i + 7), h: dv.getUint16(i + 5) };
         }
-        const len = (buf[i + 2]! << 8) | buf[i + 3]!;
-        i += 2 + len;
+        if (marker === 0xda || marker === 0xd9) return none; // scan data / EOI before any SOF
+        i += 2 + dv.getUint16(i + 2);
       }
-    }
-    if (mime === 'image/gif' && buf.length > 10) {
-      const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-      return { w: dv.getUint16(6, true), h: dv.getUint16(8, true) };
     }
   } catch {
     /* fall through */
   }
-  return { w: null, h: null };
+  return none;
 }
 
 function parseJson<T>(v: T | string, fb: T): T {
