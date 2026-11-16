@@ -9,6 +9,7 @@ import {
   listDeliveries,
 } from '../../webhooks/dispatch.js';
 import { errorResponse } from './_helpers.js';
+import { normalizeDates } from '../../db/datetime.js';
 import { requireAuth, isResponse, type AuthContext } from '../../auth/middleware.js';
 import { can } from '../../permissions/check.js';
 
@@ -82,5 +83,5 @@ webhookRoutes.get('/:id/deliveries', async (c) => {
   if (isResponse(g)) return g;
   const id = Number(c.req.param('id'));
   if (!Number.isFinite(id)) return errorResponse(c, 'badRequest', 'Invalid id', 400);
-  return c.json({ data: await listDeliveries(id) });
+  return c.json({ data: normalizeDates(await listDeliveries(id)) });
 });

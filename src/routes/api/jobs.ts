@@ -35,10 +35,10 @@ jobsRoutes.get('/', async (c) => {
   }
   params.push(limit);
   const rows = await query<{
-    id: number; queue: string; status: string; runAt: unknown; attempts: number;
+    id: number; kind: string; status: string; runAt: unknown; attempts: number;
     lastError: string | null; createdAt: unknown;
   }>(
-    `SELECT \`id\`, \`queue\`, \`status\`, \`runAt\`, \`attempts\`, \`lastError\`, \`createdAt\`
+    `SELECT \`id\`, \`kind\`, \`status\`, \`runAt\`, \`attempts\`, \`lastError\`, \`createdAt\`
        FROM \`jobs\` ${where} ORDER BY \`id\` DESC LIMIT ?`,
     params,
   );
